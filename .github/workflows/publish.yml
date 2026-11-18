@@ -1,5 +1,6 @@
-# Render the book, HTML and PDF, and publish both to GitHub Pages. The HTML
-# sidebar links to the PDF (`downloads: [pdf]` in _quarto.yml).
+# Render the book, HTML and PDF, and publish both to GitHub Pages, along with
+# a second PDF in the Chapman & Hall/CRC print layout (_quarto-crc.yml). The
+# HTML sidebar links to both PDFs (`sidebar: tools` in _quarto.yml).
 #
 # No examples run here. Every example ran when its chapter was last rendered
 # locally, and Quarto uses those results from the committed _freeze/
@@ -72,6 +73,13 @@ jobs:
 
       - name: Render
         run: quarto render
+
+      # The CRC print layout, from the same _freeze/ results, into _book-crc/;
+      # the sidebar's second PDF button links to the copy in _book/
+      - name: Render the print-layout PDF
+        run: |
+          quarto render --profile crc --to pdf
+          cp _book-crc/rust4r-crc.pdf _book/
 
       - uses: actions/configure-pages@v6
 

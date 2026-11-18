@@ -8,13 +8,22 @@ book:
   subtitle: "Oxidizing Your R Toolkit"
   author: "Brandon M. Greenwell"
   date: today
-  # A download button in the HTML sidebar that links to the PDF
-  downloads: [pdf]
   # A GitHub icon in the sidebar, and source, edit, and issue links below the
   # table of contents on each page
   repo-url: https://github.com/bgreenwell/rust4r
   repo-branch: main
   repo-actions: [source, edit, issue]
+  # Two PDF buttons in the HTML sidebar, ahead of the GitHub icon: the book's
+  # own PDF, and the Chapman & Hall/CRC print layout, which the publish
+  # workflow builds with _quarto-crc.yml and copies next to the site
+  sidebar:
+    tools:
+      - icon: file-pdf
+        href: Rust-for-R-Programmers.pdf
+        text: "Download PDF"
+      - icon: printer
+        href: rust4r-crc.pdf
+        text: "PDF in the print layout (7 x 10 in.)"
   chapters:
     - index.qmd
     - part: "Foundations"
