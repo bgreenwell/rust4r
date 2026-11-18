@@ -1,0 +1,125 @@
+# Quick reference: the R to Rust concept map {#sec-concept-map}
+
+Every chapter from @sec-setup on ends with a summary table. This appendix collects the main pairings from those tables, grouped by part, with the chapter that covers each one. Treat them as starting points rather than equivalences: the chapters' "Where the analogy breaks" boxes say where each one stops working.
+
+## Foundations
+
+| R | Rust | Ch. |
+|---------------------------|---------------------------|----|
+| Type at the console | Write `src/main.rs`, then `cargo run` | [-@sec-setup] |
+| `x <- 5` | `let x = 5;`, or `let mut x = 5;` to allow reassignment | [-@sec-setup] |
+| `function(x, y) x + y` | `fn add(x: i32, y: i32) -> i32 { x + y }` | [-@sec-setup] |
+| `for (i in 1:3)` | `for i in 1..=3` | [-@sec-setup] |
+| `c(10, 20, 30)` | `vec![10, 20, 30]` | [-@sec-vectors] |
+| `x[1]` is the first element | `v[0]` is the first element | [-@sec-vectors] |
+| `x[2:3]` copies two elements | `&v[1..3]`, a slice, copies nothing | [-@sec-vectors] |
+| Recycling and vectorized arithmetic | A loop or an iterator | [-@sec-vectors] |
+| `1L`, an integer, and `1`, a double | `1`, an `i32`, and `1.0`, an `f64` | [-@sec-types] |
+| Types checked at runtime with `typeof()` | Types known at compile time | [-@sec-types] |
+| Integer overflow gives `NA` and a warning | Panics in debug builds; wraps in release builds, except in division | [-@sec-types] |
+| Mixed types are coerced automatically | Conversions are explicit, with `from()` or `as` | [-@sec-types] |
+| `as.integer("x")` gives `NA` and a warning | `parse()` returns a `Result` | [-@sec-types] |
+| A character vector | `String`, which owns text, and `&str`, which refers to it | [-@sec-strings] |
+| `paste0()`, `sprintf()` | `format!` | [-@sec-strings] |
+| `nchar()` | `chars().count()`; `len()` counts bytes | [-@sec-strings] |
+| `NA` | `Option<T>`: `None` or `Some(value)` | [-@sec-missingness] |
+| `if (!is.na(x))` | `if let Some(value) = x` | [-@sec-missingness] |
+| `ifelse(is.na(x), 0, x)` | `x.unwrap_or(0.0)` | [-@sec-missingness] |
+
+## Objects and dispatch
+
+| R | Rust | Ch. |
+|---------------------------|---------------------------|----|
+| `list(mean = 0, sd = 1)` | `Normal { mean: 0.0, sd: 1.0 }`, after `struct Normal` | [-@sec-structs] |
+| S4 slots | Struct fields with declared types | [-@sec-structs] |
+| An S3 generic that calls `UseMethod()` | A method declared in a trait | [-@sec-s3-traits] |
+| A method such as `variance.normal()` | `impl Distribution for Normal` | [-@sec-s3-traits] |
+| A `.default` method | A default method in the trait, for its implementors only | [-@sec-s3-traits] |
+| Class vectors and `NextMethod()` | No inheritance; traits and composition | [-@sec-s3-traits] |
+| Any package can register any method | The orphan rule | [-@sec-s3-traits] |
+| `print()` and `format()` methods, S4 `show()` | `impl fmt::Display` | [-@sec-display] |
+| `str(x)` | `#[derive(Debug)]` and `{:?}` | [-@sec-display] |
+| `sprintf("%.2f", x)` | `{:.2}` | [-@sec-display] |
+| A validity function | A `new()` that returns a `Result` | [-@sec-s4] |
+| `obj@sd <- -1` skips validity | Private fields can't be assigned outside their module | [-@sec-s4] |
+| A virtual class | A trait | [-@sec-s4] |
+| `"+.normal"`, `Ops.normal()` | `impl Add for Normal`, and the other operator traits | [-@sec-operators] |
+| `setMethod("+", signature("Normal", "Uniform"))` | `impl Add<Uniform> for Normal` | [-@sec-multiple-dispatch] |
+| Duck typing | A trait bound, `<T: Distribution>` | [-@sec-generics] |
+| A list of objects of different classes | `Vec<Box<dyn Distribution>>` | [-@sec-generics] |
+| `factor()` | An `enum` | [-@sec-enums] |
+| `switch()` | `match`, which must cover every case | [-@sec-enums] |
+| A list with a `family` tag | An enum variant with fields | [-@sec-enums] |
+| `setClassUnion()`, which can gain members later | An enum, whose variants are fixed | [-@sec-enums] |
+| S7 `new_class()` with a validator | A struct with private fields and a validating `new()` | [-@sec-s7] |
+
+## Memory and mutation
+
+| R | Rust | Ch. |
+|---------------------------|---------------------------|----|
+| `y <- x` shares the value until one changes | `let y = x;` moves a `Vec` and copies a number; `.clone()` copies a `Vec` | [-@sec-ownership] |
+| `tracemem()` finds the hidden copies | Copies are visible, usually as `.clone()` | [-@sec-ownership] |
+| The garbage collector frees memory | Memory is freed when its owner goes out of scope | [-@sec-ownership] |
+| A function that only reads its argument | `&T`, a shared reference | [-@sec-borrowing] |
+| A function can't change its caller's vector | `&mut T`, a mutable reference | [-@sec-borrowing] |
+| The garbage collector keeps referenced values alive | A reference can't outlive its value | [-@sec-borrowing] |
+| An environment passed to a function and changed there | `&mut T` | [-@sec-environments] |
+| A Reference Class | A struct with `&mut self` methods | [-@sec-environments] |
+| Several names for one mutable object | `Rc<RefCell<T>>` | [-@sec-environments] |
+| `on.exit()` | `impl Drop` | [-@sec-drop] |
+| `reg.finalizer()` runs after a garbage collection | `drop()` runs at a known point in the code | [-@sec-drop] |
+
+## Functions, errors, and macros
+
+| R | Rust | Ch. |
+|---------------------------|---------------------------|----|
+| `lapply(x, f)`, `sapply(x, f)` | `v.iter().map(f).collect()` | [-@sec-iterators] |
+| `vapply(x, f, numeric(1))` | `.collect()` into a declared type | [-@sec-iterators] |
+| `Filter(f, x)`, `x[x > 15]` | `.filter()` | [-@sec-iterators] |
+| `Reduce(f, x, init)` | `.fold(init, ...)` | [-@sec-iterators] |
+| `Map(f, x, y)` | `.zip()`, then `.map()` | [-@sec-iterators] |
+| `\(x) x^2` | `|x: f64| x.powi(2)` | [-@sec-closures] |
+| A function factory | A function that returns `impl Fn`, with `move` | [-@sec-closures] |
+| Passing a function, as to `optimize()` | An argument of type `impl Fn(f64) -> f64` | [-@sec-closures] |
+| `<<-` keeps state between calls | An `FnMut` closure | [-@sec-closures] |
+| Arguments evaluated when first used | Arguments evaluated before the call; closures delay work | [-@sec-closures] |
+| `stop()` | `Err(...)`, or `panic!` for bugs | [-@sec-errors] |
+| `tryCatch()` | `match` on `Ok` and `Err`, or `?` to pass the error up | [-@sec-errors] |
+| Condition classes | An error enum | [-@sec-errors] |
+| `warning()` | `eprintln!`, or information in the result | [-@sec-errors] |
+| `substitute()`, `quote()` | `macro_rules!`, expanded at compile time | [-@sec-macros] |
+| `stopifnot()` | `assert!`, `assert_eq!` | [-@sec-macros] |
+| `print()` while debugging | `dbg!` | [-@sec-macros] |
+
+## Building Rust programs
+
+| R | Rust | Ch. |
+|---------------------------|---------------------------|----|
+| A named vector or list | `HashMap`, or `BTreeMap` for sorted keys | [-@sec-collections] |
+| `table(x)` | `*counts.entry(v).or_insert(0) += 1` in a loop | [-@sec-collections] |
+| `split(x, g)`, `tapply(x, g, f)` | `BTreeMap<K, Vec<V>>` with `entry().or_default().push()` | [-@sec-collections] |
+| `unique()`, `union()`, `%in%` | `HashSet`, `BTreeSet` | [-@sec-collections] |
+| A data frame | A `Vec` of structs, one per row | [-@sec-collections] |
+| `readLines(path)` | `fs::read_to_string(path)?` and `.lines()` | [-@sec-io] |
+| `read.csv()` | The `csv` crate, with `serde` structs | [-@sec-io] |
+| `DESCRIPTION` | `Cargo.toml` | [-@sec-crates] |
+| `export()` in `NAMESPACE` | `pub` | [-@sec-crates] |
+| roxygen2 `#'` | `///` and `cargo doc` | [-@sec-crates] |
+| `R CMD check` | `cargo check`, `cargo clippy`, and `cargo test` | [-@sec-crates] |
+| `styler::style_pkg()` | `cargo fmt` | [-@sec-crates] |
+| `Rscript` and `commandArgs()` | A compiled program, with `std::env::args()` or `clap` | [-@sec-cli] |
+| `parallel::mclapply()` | `thread::spawn()`, `thread::scope()`, or `rayon` | [-@sec-concurrency] |
+| `set.seed()` in each parallel task | A seeded generator per task, from `rand` | [-@sec-concurrency] |
+| `unlist()` on a list of vectors | `.concat()` | [-@sec-concurrency] |
+| `x[!is.na(x)]` | `v.iter().flatten().copied()`, then `.collect()` | [-@sec-capstone] |
+| `sort(x)` for doubles | `v.sort_by(f64::total_cmp)` | [-@sec-capstone] |
+
+## Extending R with Rust
+
+| R and C | Rust | Ch. |
+|---------------------------|---------------------------|----|
+| `.Call("name", x)` | `#[unsafe(no_mangle)] pub extern "C" fn name` | [-@sec-extending-r] |
+| `REAL(x)`, `INTEGER(x)` | The same functions, then `std::slice::from_raw_parts()` for a non-empty vector | [-@sec-extending-r] |
+| `NA_INTEGER` | `i32::MIN` | [-@sec-extending-r] |
+| C wrappers written by hand | `#[extendr]` and rextendr | [-@sec-extending-r] |
+| A compiled objective for `optim()` | `rextendr::rust_function()` with `profile = "release"` | [-@sec-extending-r] |

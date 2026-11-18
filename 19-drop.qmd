@@ -1,0 +1,253 @@
+# From `on.exit()` to `Drop` {#sec-drop}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R functions clean up after themselves with `on.exit()`: restore an option, close a connection, delete a temporary file. The cleanup belongs to the function, and it runs when the function exits, whether it returns normally or stops with an error. Rust attaches cleanup to values instead. When a value's owner goes out of scope, Rust runs the value's `Drop` implementation, and that's how files get closed and memory gets freed without a call to do it. C++ programmers call this pattern RAII, for "resource acquisition is initialization" [@rustbook, sec. 4.1]. This chapter compares the two approaches: when cleanup runs, in what order, and what happens when something goes wrong. The matching section of the Rust book is "Running Code on Cleanup with the Drop Trait" [@rustbook, sec. 15.3].
+
+## Cleanup in R and in Rust
+
+A common use of `on.exit()` is to close a connection that a function opened, however the function exits:
+
+```{r}
+#| label: r-on-exit
+count_lines <- function(path) {
+  con <- file(path, open = "r")
+  on.exit(close(con))
+  length(readLines(con))
+}
+
+count_lines("data/airquality.csv")
+```
+
+In R, `on.exit(close(con))` registers the code that closes the connection, and it runs when `count_lines()` exits, whether the function returns or fails. In Rust, cleanup goes in a `drop()` method, part of the `Drop` trait. Here a `Connection` stands in for a resource that has to be released:
+
+```{rust}
+#| label: rust-drop
+struct Connection {
+    name: String,
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        println!("closing {}", self.name);
+    }
+}
+
+fn main() {
+    let conn = Connection { name: String::from("data.csv") };
+    println!("reading {}", conn.name);
+}
+```
+
+The `main()` function never calls `drop()`. When `conn` goes out of scope at the closing brace of `main()`, Rust calls it, and `closing data.csv` appears after the last line of `main()`. The `drop()` method takes `&mut self`, like the methods in @sec-environments, so it can change the value while it cleans up.
+
+::: {.callout-tip title="The same idea in R"}
+R's `on.exit()` ties cleanup to the end of a function, and Rust's `Drop` ties it to the end of a value's scope. For a value that stays in a function's local variable until the function returns, those are the same moment. The difference is that `on.exit()` has to be written in every function that needs it, while a `Drop` implementation is written once, for the type, and runs everywhere a value of that type is used. The code that uses the value never has to remember the cleanup.
+:::
+
+## Ending a value's life early
+
+A value is dropped at the end of the block that owns it, so a block can end it early. The `drop()` function ends it at once:
+
+```{rust}
+#| label: rust-drop-early
+# struct Connection {
+#     name: String,
+# }
+#
+# impl Drop for Connection {
+#     fn drop(&mut self) {
+#         println!("closing {}", self.name);
+#     }
+# }
+#
+fn main() {
+    let a = Connection { name: String::from("a") };
+    {
+        let b = Connection { name: String::from("b") };
+        println!("end of block");
+    }
+    drop(a);
+    println!("end of main");
+}
+```
+
+The inner block's `b` is dropped at the end of that block, and `drop(a)` drops `a` before `main()` finishes, the way an R function might call `close(con)` before it returns. The `drop()` function works by taking ownership: it moves `a` into itself and does nothing with it, so `a` is dropped when `drop()` returns. Calling the method directly, as `a.drop()`, is a compile error, because Rust would then drop `a` a second time at the end of `main()`.
+
+## Cleanup order
+
+In R, `on.exit(add = TRUE)` adds cleanup code after what's already registered, so by default R runs the cleanup in the order it was registered. Setting `after = FALSE` puts new code first instead:
+
+```{r}
+#| label: r-on-exit-order
+f <- function() {
+  on.exit(cat("first registered\n"))
+  on.exit(cat("second registered\n"), add = TRUE)
+  on.exit(cat("third, with after = FALSE\n"), add = TRUE, after = FALSE)
+  cat("body\n")
+}
+
+f()
+```
+
+Rust has no option to choose. At the end of a scope, its local variables are dropped in the reverse of the order they were declared:
+
+```{rust}
+#| label: rust-drop-order
+# struct Connection {
+#     name: String,
+# }
+#
+# impl Drop for Connection {
+#     fn drop(&mut self) {
+#         println!("closing {}", self.name);
+#     }
+# }
+#
+fn main() {
+    let a = Connection { name: String::from("a") };
+    let b = Connection { name: String::from("b") };
+    let c = Connection { name: String::from("c") };
+    println!("end of main");
+}
+```
+
+Reverse order is the safe default, because a value declared later may depend on one declared earlier, and it has to be cleaned up while the earlier one still exists. R's help page for `on.exit()` makes the same point: the last-in, first-out order that `after = FALSE` gives is the one for closing resources. When you need a different order in Rust, use blocks or `drop()`. A struct's fields follow a different rule: they're dropped in the order they're declared, after the struct's own `drop()` runs, if it has one [@rust-std].
+
+## Cleanup when things go wrong
+
+In R, code registered with `on.exit()` runs when a function stops with an error, too. The `tryCatch()` here only catches the error so that both lines of output appear; the cleanup runs either way:
+
+```{r}
+#| label: r-on-exit-error
+read_data <- function() {
+  on.exit(cat("cleanup\n"))
+  stop("something went wrong")
+}
+
+tryCatch(read_data(), error = function(e) conditionMessage(e))
+```
+
+By default, when Rust code panics, the program unwinds: it leaves each function in turn, dropping that function's values as it goes:
+
+```{rust}
+#| label: rust-drop-panic
+#| error: true
+# struct Connection {
+#     name: String,
+# }
+#
+# impl Drop for Connection {
+#     fn drop(&mut self) {
+#         println!("closing {}", self.name);
+#     }
+# }
+#
+fn read_data() {
+    let conn = Connection { name: String::from("data.csv") };
+    panic!("something went wrong");
+}
+
+fn main() {
+    read_data();
+}
+```
+
+The panic message comes first, and then `conn` is dropped as the panic leaves `read_data()`. A function that returns early with an error value drops its values in the same way (@sec-errors). A program can also be built to abort on a panic instead of unwinding, and then this cleanup doesn't run.
+
+A value is dropped when nothing owns it anymore, so cleanup code that has to wait must be held in a variable:
+
+```{rust}
+#| label: rust-drop-underscore
+# struct Connection {
+#     name: String,
+# }
+#
+# impl Drop for Connection {
+#     fn drop(&mut self) {
+#         println!("closing {}", self.name);
+#     }
+# }
+#
+fn main() {
+    let _ = Connection { name: String::from("a") };
+    let _b = Connection { name: String::from("b") };
+    println!("end of main");
+}
+```
+
+Writing `let _ =` doesn't create a variable. The pattern `_` ignores a value (@sec-enums), so nothing owns the first connection, and it's dropped on the spot. The name `_b`, on the other hand, is an ordinary variable. A leading underscore only tells the compiler not to warn that the variable is never used, which is common for a value that exists only to be dropped later. For a variable that already exists, `let _ = a;` does nothing at all: `a` keeps its value, and `drop(a)` is still the way to end it early.
+
+## Cleanup moves with ownership
+
+A value is dropped by whoever owns it when ownership ends. Move it into a function that doesn't hand it back, and that function drops it:
+
+```{rust}
+#| label: rust-drop-move
+# struct Connection {
+#     name: String,
+# }
+#
+# impl Drop for Connection {
+#     fn drop(&mut self) {
+#         println!("closing {}", self.name);
+#     }
+# }
+#
+fn consume(conn: Connection) {
+    println!("using {}", conn.name);
+}
+
+fn main() {
+    let a = Connection { name: String::from("a") };
+    consume(a);
+    println!("back in main");
+}
+```
+
+The connection in `a` is closed at the end of `consume()`, before `main()` prints its last line, because `consume()` owned it by then. Since a value has one owner at a time (@sec-ownership), Rust never drops a value twice. It doesn't promise to drop every value, though: an `Rc` cycle leaks (@sec-environments), and ending a program with `std::process::exit()` (@sec-cli) skips the drops still pending [@rust-std].
+
+Implementing `Drop` limits a type in two ways. It can't be `Copy`, because Rust would have to know which of the copies to clean up. And no field can be moved out of it, as in `let name = a.name;`, because `drop()` still needs every field.
+
+The standard library uses `Drop` throughout. A `Vec` frees its elements, a `String` its text, and an open `File` closes itself, so Rust code has no `close()` for files (@sec-io). Your own `Drop` implementations are for what the standard library doesn't already handle: a resource it doesn't manage, or an action such as restoring a setting when a value goes away.
+
+## Finalizers
+
+R's closest equivalent of `Drop` is a finalizer, a function that `reg.finalizer()` registers to run when an environment is garbage collected:
+
+```{r}
+#| label: r-finalizer
+e <- new.env()
+invisible(reg.finalizer(e, function(env) cat("finalizer ran\n")))
+rm(e)
+cat("removed\n")
+invisible(gc())
+```
+
+Removing `e` doesn't run the finalizer. The next garbage collection, here forced with `gc()`, schedules it, and R runs it soon after, once that's safe.
+
+::: {.callout-warning title="Where the analogy breaks"}
+R decides when a finalizer runs, and it may run long after the last reference is gone, or, unless `onexit = TRUE`, not at all before R exits. That's why R code relies on `on.exit()` for cleanup that has to happen at a particular time. A Rust value is dropped at a point you can find by reading the code: the end of its owner's scope, or a call to `drop()`.
+:::
+
+::: {.callout-note title="Package developer notes: when R's errors skip cleanup" collapse="true"}
+An R error raised from C code doesn't return through the C functions on the way to its handler. R jumps straight there, with C's `longjmp()`, so any cleanup those functions meant to do is skipped. The C function `R_UnwindProtect()` lets C code register a cleanup function that runs even when R jumps out [@r-exts, sec. 6.13].
+
+Rust code called from R has the same problem in both directions. An R error that jumps over Rust functions skips their drops, and for Rust that's worse than a missed cleanup. Rust assumes that a function's local values are dropped before its memory on the stack is released. A jump like `longjmp()` breaks that assumption, which Rust counts as undefined behavior [@rust-reference]. A Rust panic can't travel the other way, through R's C code: a panic that reaches the end of an `extern "C"` function stops the whole process. Rust code that calls R, or that R calls, has to turn R errors and Rust panics into ordinary values at the boundary, which is part of what @sec-extending-r covers.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `on.exit()` in every function that needs cleanup | `impl Drop` once, for the type |
+| Runs when the function exits | Runs when the owner goes out of scope |
+| `close(con)` before returning | `drop(conn)`, or an inner block |
+| Registration order by default; `after = FALSE` for reverse | Local variables in reverse declaration order |
+| Runs on `stop()` | Runs as a panic unwinds |
+| `reg.finalizer()` runs after a garbage collection | `drop()` runs at a known point in the code |
+| `close()` for files and connections | Files close themselves when dropped |

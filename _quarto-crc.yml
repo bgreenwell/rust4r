@@ -1,0 +1,24 @@
+# Chapman & Hall/CRC format: CRC's krantz class at the 7x10 trim (krantz2),
+# with CRC's preamble from github.com/bgreenwell/quarto-crc. The book's own
+# PDF settings in _quarto.yml (code labels, line wrapping) still apply.
+# Build with
+#
+#   quarto render --profile crc --to pdf
+#
+# which writes _book-crc/rust4r-crc.pdf. A plain `quarto render`, and so the
+# published book, doesn't use this file.
+
+project:
+  output-dir: _book-crc
+
+book:
+  output-file: rust4r-crc
+
+format:
+  pdf:
+    documentclass: krantz
+    classoption: [krantz2]
+    include-in-header:
+      - file: latex/crc-preamble.tex
+      # Darker grays for the callouts in black-and-white print
+      - file: latex/crc-grayscale.tex

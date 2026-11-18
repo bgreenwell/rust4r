@@ -1,0 +1,41 @@
+name: Error in the book
+description: Code that fails or prints something unexpected, or a claim about R or Rust that's wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every example runs when the book is built, so the output shown is real, but the code or the explanation around it can still be wrong. Thanks for checking.
+  - type: input
+    id: location
+    attributes:
+      label: Where
+      description: The chapter and section, or the page's URL.
+      placeholder: "Chapter 21, Functions that take functions"
+    validations:
+      required: true
+  - type: textarea
+    id: passage
+    attributes:
+      label: The passage
+      description: Copy the sentence or code that's wrong, so it can be found exactly.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong
+      description: What the book says or does, and why it's wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: What it should say
+      description: The correction, or what you expected the code to do, if you know.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How you checked
+      description: The code you ran and its output, with your versions (`rustc --version` and `R.version.string`).
+      render: text

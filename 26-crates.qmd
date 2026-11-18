@@ -1,0 +1,283 @@
+# Packages to crates and modules {#sec-crates}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+An R package bundles code with metadata in `DESCRIPTION`, an interface in `NAMESPACE`, documentation, and tests, and `R CMD check` makes sure the pieces fit together. A Rust package, managed by Cargo, has the same pieces, arranged differently: metadata and dependencies in `Cargo.toml`, an interface made of `pub` items in modules, documentation in `///` comments, tests in `#[test]` functions, and a family of `cargo` commands to check it all. This chapter builds a small crate around the running class, split across two files. It also explains paths and `use`, which earlier chapters used under "Syntax ahead" notes. The matching chapters of the Rust book are "Packages, Crates, and Modules" and "Writing Automated Tests" [@rustbook, chaps. 7, 11].
+
+## `DESCRIPTION` and `Cargo.toml`
+
+A package's `DESCRIPTION` file names it, versions it, and lists what it needs [@r-exts, sec. 1.1.1]:
+
+```{.dcf filename="DESCRIPTION"}
+Package: distr
+Title: Probability Distributions as Objects
+Version: 0.1.0
+Authors@R: person("Brandon", "Greenwell", email = "brandon@example.com",
+                  role = c("aut", "cre"))
+Description: Normal and uniform distributions with validated parameters.
+License: MIT + file LICENSE
+Depends: R (>= 4.1.0)
+Imports: stats
+```
+
+A Cargo package's `Cargo.toml` does the same:
+
+```{.toml filename="Cargo.toml"}
+[package]
+name = "distr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Normal and uniform distributions with validated parameters"
+license = "MIT"
+
+[dependencies]
+csv = "1.4"
+```
+
+| `DESCRIPTION` | `Cargo.toml` |
+|---------------------------|---------------------------|
+| `Package:` | `name` |
+| `Version:` | `version` |
+| `Depends: R (>= 4.1.0)` | `rust-version`, and the language `edition` |
+| `Imports:` and `LinkingTo:` | `[dependencies]` |
+| `Suggests:` for tests and examples | `[dev-dependencies]` |
+| `License:` | `license` |
+
+A version requirement such as `csv = "1.4"` is shorthand for `^1.4`: any version from 1.4.0 up to, but not including, 2.0.0, since by convention only a change that breaks existing code gets a new major version. Before 1.0, the minor version plays that role, so `rand = "0.10"` accepts 0.10.3 but not 0.11.0 [@rustbook, chap. 2]. The command `cargo add csv` adds the line for you, using the latest version on crates.io, Rust's counterpart of CRAN. Cargo writes the versions it actually chose to `Cargo.lock`, so a later build uses exactly the same ones. Base R has nothing like that file; the `renv` package's `renv.lock` is the closest equivalent.
+
+A package holds one or more *crates*, each compiled on its own. A crate is either a *binary*, a program with a `main()` in `src/main.rs`, or a *library*, code for other crates to use, rooted at `src/lib.rs`. A package can have at most one library and any number of binaries. Running `cargo new` makes a package with a binary crate, and `cargo new --lib` makes one with a library crate. An R package corresponds to a Cargo package with a library crate, and an `Rscript` program to a binary crate.
+
+## Modules and files
+
+An R package's `R/` directory can hold any number of files, and R loads them all into one namespace. Rust organizes a crate as a tree of *modules*. @sec-s4 wrote a module inline, as `mod distributions { ... }`; in a real crate, each module usually gets a file of its own. Here is the running class in `src/distributions.rs`:
+
+```{rust}
+#| label: rust-module-file
+#| write: src/distributions.rs
+use std::fmt;
+
+/// A random variable's mean and variance, with a default standard deviation.
+pub trait Distribution {
+    fn mean(&self) -> f64;
+    fn variance(&self) -> f64;
+
+    fn std_dev(&self) -> f64 {
+        self.variance().sqrt()
+    }
+}
+
+/// A normal distribution with a positive standard deviation.
+#[derive(Debug, Clone, Copy)]
+pub struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl Normal {
+    /// Creates a normal distribution, or explains why it can't.
+    ///
+    /// Returns an error if `sd` is not positive.
+    pub fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+        let sd = check_sd(sd)?;
+        Ok(Normal { mean, sd })
+    }
+}
+
+fn check_sd(sd: f64) -> Result<f64, String> {
+    if sd > 0.0 {
+        Ok(sd)
+    } else {
+        Err(format!("sd must be positive, not {sd}"))
+    }
+}
+
+impl Distribution for Normal {
+    fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    fn variance(&self) -> f64 {
+        self.sd * self.sd
+    }
+}
+
+impl fmt::Display for Normal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Normal(mean = {}, sd = {})", self.mean, self.sd)
+    }
+}
+```
+
+The file `src/main.rs` declares the module with `mod distributions;`, which tells the compiler to read it from `src/distributions.rs`:
+
+```{rust}
+#| label: rust-module-main
+#| cargo: true
+#| filename: src/main.rs
+mod distributions;
+
+use distributions::{Distribution, Normal};
+
+fn main() {
+    let n = Normal::new(10.0, 2.0).unwrap();
+    println!("{n}");
+    println!("{}", n.std_dev());
+}
+```
+
+A file isn't part of the crate until some module declares it with `mod`. A module can have submodules of its own: `mod tests;` inside `src/distributions.rs` would read `src/distributions/tests.rs`.
+
+::: {.callout-warning title="Where the analogy breaks"}
+Every file in an R package's `R/` directory shares one namespace, so a function defined in one file is visible in all the others, and the order in which the files are loaded can matter. Rust modules are separate namespaces: code in `main.rs` sees only what `distributions` makes public, and only through its path, `distributions::Normal`, or through `use`.
+:::
+
+## Exports: `pub` and `NAMESPACE`
+
+An R package lists what it exports in `NAMESPACE`, with directives such as `export(normal)` [@r-exts, sec. 1.5.1]. Everything else is internal, but `distr:::check_sd()` reaches it anyway. Rust's equivalent of an export is `pub`. Items are private to their module unless marked `pub`, and there's no `:::`:
+
+```{rust}
+#| label: rust-private-fn
+#| cargo: true
+#| filename: src/main.rs
+#| error: true
+mod distributions;
+
+fn main() {
+    println!("{:?}", distributions::check_sd(-1.0));
+}
+```
+
+The function `check_sd()` has no `pub`, so it can be called only from inside `distributions`. The same goes for the fields of `Normal`, which is how @sec-s4 kept every `Normal` valid. Marking an item `pub(crate)` is a middle ground: visible anywhere in the crate, invisible to other crates, much like an R function that's internal to a package.
+
+For another crate, `pub` on `Normal` isn't enough. An item in a private module is out of reach from outside the crate, so a library's `src/lib.rs` would declare `pub mod distributions;`, and the other crate would then write `use distr::distributions::Normal;`. Within one crate, as here, the module can stay private.
+
+## Paths and `use`
+
+Every item in Rust has a path. The path `std::collections::HashMap` names the item `HashMap` in the module `collections` of the crate `std`, the standard library, much as `stats::sd` is the function `sd` in the package `stats`. The `std::any::type_name` of @sec-types and the `csv::Reader` of @sec-io are paths too. A path that starts with `crate::` begins at the root of the current crate, and one that starts with `super::` begins at the parent module.
+
+A `use` declaration brings an item into scope so that it can be called by its last name. It's the counterpart of `importFrom()` in a `NAMESPACE` file, but it applies to one module instead of the whole package:
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `stats::sd(x)` | `std::collections::HashMap::new()` |
+| `importFrom(stats, sd)` | `use std::collections::HashMap;` |
+| `importFrom(stats, sd, var)` | `use std::collections::{HashMap, HashSet};` |
+| `import(stats)`, or `library(stats)` | `use std::collections::*;` |
+
+A `use` can name a module as well as an item: `use std::fmt;` in @sec-display made `fmt::Display` and `fmt::Result` available without `std::`. Bringing everything in with `*` is possible, but most Rust code avoids it outside of tests, for the same reason R package developers prefer `importFrom()` to `import()`: it's easier to see where each name came from.
+
+A trait's methods can be called only where the trait itself is in scope (@sec-s7). That's why the `src/main.rs` earlier in this chapter brings in `Distribution` along with `Normal`: without it, `n.std_dev()` fails to compile, and the compiler suggests the missing `use`.
+
+## Tests
+
+An R package keeps test scripts in `tests/`, and `R CMD check` runs them [@r-exts, sec. 1.1.5]. In base R, a test is a script that stops if something is wrong, usually with `stopifnot()`; the testthat package adds structure on top.
+
+Rust tests are functions marked `#[test]`, usually in a module of their own at the bottom of the file they test, and `cargo test` runs them:
+
+```{rust}
+#| label: rust-tests
+#| cargo: test
+#| filename: src/main.rs
+mod distributions;
+
+use distributions::{Distribution, Normal};
+
+fn main() {
+    let n = Normal::new(10.0, 2.0).unwrap();
+    println!("{n}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variance_is_sd_squared() {
+        let n = Normal::new(0.0, 3.0).unwrap();
+        assert_eq!(n.variance(), 9.0);
+    }
+
+    #[test]
+    fn negative_sd_is_rejected() {
+        assert!(Normal::new(0.0, -1.0).is_err());
+    }
+
+    #[test]
+    fn std_dev_undoes_variance() {
+        let n = Normal::new(5.0, 0.5).unwrap();
+        assert_eq!(n.std_dev(), 0.5);
+    }
+}
+```
+
+The attribute `#[cfg(test)]` compiles the `tests` module only when testing, so it adds nothing to the program itself. Inside it, `use super::*;` brings in everything from the parent module, which includes `Normal` and `Distribution`. A test passes if it returns without panicking, so the `assert!` and `assert_eq!` macros from @sec-macros do the checking. The method `is_err()` returns `true` for an `Err`, as `is_none()` does for a `None` (@sec-missingness). A failed `assert_eq!` reports both values and the line, a failed `assert!` prints the condition's code, and `cargo test` lists every failure at the end. Library crates can also have integration tests in a `tests/` directory, which use the crate only through its public interface, as another crate would.
+
+## Documentation
+
+roxygen2 turns `#'` comments into help pages. Rust's `///` comments, which `distributions.rs` used above, are its own documentation format, and `cargo doc` turns them into HTML pages, the counterpart of a package's reference manual. A `//!` comment at the top of a file documents the module or crate itself. The comments are Markdown, and a code example inside one is compiled and run by `cargo test` when the crate is a library, so an example that stops compiling or fails an assertion is caught. Running a package's examples is part of `R CMD check` for the same reason [@r-exts, sec. 1.3.1]. Running `cargo doc --open` builds the pages and opens them in a browser:
+
+```{.bash filename="Terminal"}
+cargo doc --open
+```
+
+## `R CMD check` and `cargo`
+
+In R, a single command, `R CMD check`, runs many checks [@r-exts, sec. 1.3.1]. Cargo splits them up:
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `R CMD build` | `cargo package` |
+| `R CMD INSTALL` | `cargo build --release`, or `cargo install` for a program |
+| `R CMD check`'s code checks | `cargo check` and `cargo clippy` |
+| `R CMD check`'s tests and examples | `cargo test` |
+| `styler::style_pkg()` | `cargo fmt` |
+| `R CMD Rd2pdf`, pkgdown | `cargo doc` |
+| Submit to CRAN | `cargo publish` to crates.io |
+
+Clippy deserves a closer look, because it suggests more idiomatic code as well as pointing out mistakes. Here it is on a loop that steps through positions and spells out its addition:
+
+```{rust}
+#| label: rust-clippy
+#| cargo: clippy
+#| filename: src/main.rs
+fn total(values: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..values.len() {
+        sum = sum + values[i];
+    }
+    sum
+}
+
+fn main() {
+    println!("{}", total(&[1.0, 2.0, 3.0]));
+}
+```
+
+Both suggestions are idioms from earlier chapters: loop over the values instead of their positions, and write `sum += values[i]` (@sec-vectors). Clippy's suggested `&values` has one `&` too many, since `values` is already a slice; the loop it means is `for value in values`. Following the first suggestion all the way leads to replacing the loop with `values.iter().sum()` (@sec-iterators).
+
+::: {.callout-note title="Package developer notes: Rust inside an R package" collapse="true"}
+An R package can contain a Rust crate, usually in `src/rust/`, and call it through compiled code, as @sec-extending-r shows. CRAN's policy for such packages asks for a few things a pure Rust project wouldn't need [@cran-rust]. Dependencies must be included in the package or downloaded with a checksum, and their authors listed in `DESCRIPTION`. The `SystemRequirements` field must name Cargo and rustc. The build must use at most two parallel jobs and report the version of `rustc` it used.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `DESCRIPTION` | `Cargo.toml` |
+| `Imports:` | `[dependencies]` |
+| `renv.lock` | `Cargo.lock` |
+| CRAN | crates.io |
+| A package | A Cargo package with a library crate |
+| Files in `R/` share a namespace | Each module is its own namespace |
+| `export()` in `NAMESPACE` | `pub` |
+| `pkg:::internal()` | No equivalent; private means private |
+| `pkg::fun`, `importFrom()` | Paths, `use` |
+| `tests/` and `stopifnot()` | `#[test]` functions and `cargo test` |
+| roxygen2 `#'` | `///` and `cargo doc` |
+| `R CMD check` | `cargo check`, `clippy`, and `test` |
+| `styler::style_pkg()` | `cargo fmt` |

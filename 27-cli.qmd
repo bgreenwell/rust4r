@@ -1,0 +1,237 @@
+# Command-line programs {#sec-cli}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+An R script becomes a command-line program when you run it with `Rscript` and read its arguments with `commandArgs()`. A Rust program is a command-line program from the start: `cargo build` produces an executable, and `std::env::args()` hands it its arguments. This chapter writes the same small tool three ways: in R, in Rust with the standard library's argument handling, and in Rust with the `clap` crate [@clap], which turns a struct into an argument parser with help text and error messages. The tool prints the mean of one column of a CSV file, using the `airquality` data from @sec-io. The matching sections of the Rust book are "Accepting Command Line Arguments" and "Redirecting Errors to Standard Error" [@rustbook, secs. 12.1, 12.6].
+
+## Arguments in R
+
+In R, `commandArgs(trailingOnly = TRUE)` returns the arguments after the script's name as a character vector:
+
+```{.r filename="colmean.R"}
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) {
+  message("usage: Rscript colmean.R FILE [COLUMN]")
+  quit(status = 1)
+}
+path <- args[1]
+column <- if (length(args) >= 2) args[2] else "Temp"
+data <- read.csv(path)
+if (!column %in% names(data)) {
+  message("no column named ", column)
+  quit(status = 1)
+}
+cat(column, "mean:", mean(data[[column]], na.rm = TRUE), "\n")
+```
+
+Run from a terminal, it reads the file and column it's given, or explains how to use it and exits with a status of 1:
+
+```{.bash filename="Terminal"}
+$ Rscript colmean.R data/airquality.csv Ozone
+Ozone mean: 42.12931
+$ Rscript colmean.R
+usage: Rscript colmean.R FILE [COLUMN]
+```
+
+## Arguments in Rust
+
+In Rust, `std::env::args()` returns an iterator over the arguments. The first is, by convention, the program's own path, so `skip(1)` drops it, which is what `trailingOnly = TRUE` does in R:
+
+```{rust}
+#| label: rust-env-args
+#| cargo: true
+#| bin: colmean
+#| filename: src/main.rs
+#| args: [data/airquality.csv, Ozone]
+use std::env;
+use std::error::Error;
+use std::process;
+
+fn column_mean(path: &str, column: &str) -> Result<f64, Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path(path)?;
+    let headers = reader.headers()?;
+    let index = headers
+        .iter()
+        .position(|h| h == column)
+        .ok_or(format!("no column named {column}"))?;
+
+    let mut values = Vec::new();
+    for result in reader.records() {
+        let record = result?;
+        if let Ok(x) = record[index].parse::<f64>() {
+            values.push(x);
+        }
+    }
+    Ok(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.is_empty() {
+        eprintln!("usage: colmean FILE [COLUMN]");
+        process::exit(1);
+    }
+    let path = &args[0];
+    let column = args.get(1).map(|s| s.as_str()).unwrap_or("Temp");
+
+    match column_mean(path, column) {
+        Ok(mean) => println!("{column} mean: {mean}"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+    }
+}
+```
+
+The output starts with the command that ran the program. Running `cargo run` builds the program and then runs it, and everything after `--` is passed to the program as its arguments. To build the tool yourself, make a project with `cargo new colmean` (@sec-setup), whose name the program takes, and add the crates with `cargo add csv` and, for the version below, `cargo add clap --features derive`.
+
+The function `column_mean()` reuses pieces from earlier chapters:
+
+- `position()` returns the index of the first header that matches, as an `Option`, the counterpart of `match(column, names(data))`. Then `ok_or()` turns its `None` into an error message, so `?` can pass it up (@sec-errors).
+- `record[index]` is one field of a CSV record. Any field that doesn't parse as a number is skipped. In this file the only such field is `NA`, so the result matches `na.rm = TRUE`. The loop would also skip a stray word silently, though, and keep a field that parses as `NaN`, which `na.rm = TRUE` drops.
+- `args.get(1)` returns an `Option` for the second argument, so a missing column falls back to `"Temp"`. Calling `as_str()` borrows the `String` as a `&str`, so both branches have the same type.
+
+Without any arguments, the program explains itself and exits with status 1:
+
+```{rust}
+#| label: rust-env-args-none
+#| cargo: rerun
+#| bin: colmean
+#| echo: false
+#| error: true
+#| args: []
+// run again with no arguments
+```
+
+Rust's `eprintln!` writes to standard error, as `message()` does in R, so the usage line doesn't end up in a file when a user saves the program's output with `>`. Calling `process::exit(1)` ends the program with a status of 1, like `quit(status = 1)`, and a shell or a CI job can check that status to see that the program failed. A program that ends normally exits with 0.
+
+The program above parses its own arguments, which is fine for one or two of them. Options such as `--column Ozone`, flags in any order, and a `--help` page take a parser.
+
+## Parsing arguments with `clap`
+
+Base R has no argument parser; R scripts that need one use packages such as optparse. In Rust, the usual choice is `clap`. You describe the arguments as a struct, and `#[derive(Parser)]` writes the parser:
+
+```{rust}
+#| label: rust-clap
+#| cargo: true
+#| bin: colmean
+#| filename: src/main.rs
+#| args: [data/airquality.csv, --column, Ozone, --digits, "3"]
+# use std::error::Error;
+use clap::Parser;
+#
+# fn column_mean(path: &str, column: &str) -> Result<f64, Box<dyn Error>> {
+#     let mut reader = csv::Reader::from_path(path)?;
+#     let headers = reader.headers()?;
+#     let index = headers
+#         .iter()
+#         .position(|h| h == column)
+#         .ok_or(format!("no column named {column}"))?;
+#     let mut values = Vec::new();
+#     for result in reader.records() {
+#         let record = result?;
+#         if let Ok(x) = record[index].parse::<f64>() {
+#             values.push(x);
+#         }
+#     }
+#     Ok(values.iter().sum::<f64>() / values.len() as f64)
+# }
+
+/// Print the mean of one column of a CSV file
+#[derive(Parser)]
+struct Args {
+    /// The CSV file to read
+    file: String,
+
+    /// The column to average
+    #[arg(short, long, default_value = "Temp")]
+    column: String,
+
+    /// Decimal places to print
+    #[arg(short, long, default_value_t = 2)]
+    digits: usize,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    let mean = column_mean(&args.file, &args.column)?;
+    println!("{} mean: {:.*}", args.column, args.digits, mean);
+    Ok(())
+}
+```
+
+The function `column_mean()` is the same as before. Each field of `Args` is an argument, and its type says how to parse it:
+
+- `file`, with no attribute, is a positional argument, and because it's a `String` rather than an `Option<String>`, it's required.
+- `#[arg(short, long)]` makes `column` an option that can be given as `-c Ozone` or `--column Ozone`, named after the field. The `default_value` setting supplies `"Temp"` when it's missing.
+- `digits` is a `usize`, so `clap` parses the text into a number and rejects anything that isn't one. Its `default_value_t` setting gives the default as a value of the field's type rather than as text.
+- The `///` comments become the help text.
+
+Calling `Args::parse()` reads the program's arguments into an `Args`. In `println!`, `{:.*}` takes the number of decimal places from the argument before the value, here `args.digits`.
+
+The `clap` crate writes the help page from the struct:
+
+```{rust}
+#| label: rust-clap-help
+#| cargo: rerun
+#| bin: colmean
+#| echo: false
+#| args: [--help]
+// run again with --help
+```
+
+It also writes the error messages. Leaving out the file name and giving a `--digits` that isn't a number are each reported with a message that names the problem, and the program exits with status 2, the convention for a usage error:
+
+```{rust}
+#| label: rust-clap-missing
+#| cargo: rerun
+#| bin: colmean
+#| echo: false
+#| error: true
+#| args: [--column, Ozone]
+// run again without a file
+```
+
+```{rust}
+#| label: rust-clap-invalid
+#| cargo: rerun
+#| bin: colmean
+#| echo: false
+#| error: true
+#| args: [data/airquality.csv, --digits, two]
+// run again with a bad --digits
+```
+
+::: {.callout-note title="An R habit to drop in Rust"}
+An R script checks its arguments by hand, if at all: is there one, is it a number, does the file exist? With `clap`, the struct is the specification. Whatever reaches `main()` as an `Args` already has a file name and a `digits` that's a number, so the code after `Args::parse()` doesn't need to check them again. The parser doesn't check that the file exists, though; opening it in `column_mean()` does.
+:::
+
+## Building and installing
+
+The command `cargo run` is for development. Running `cargo build --release` builds an optimized program in `target/release/`, and `cargo install --path .` builds one and copies it to `~/.cargo/bin`, which rustup puts on your `PATH` [@rustbook, sec. 14.4]:
+
+```{.bash filename="Terminal"}
+cargo install --path .
+colmean data/airquality.csv --column Wind
+```
+
+An R script needs R, and the right packages, on every machine that runs it. A Rust program compiles to a single executable that runs without Rust installed. It needs the operating system and kind of processor it was built for, in a version no older than the one the build targets.
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `Rscript script.R a b` | `cargo run -- a b`, or the built program |
+| `commandArgs(trailingOnly = TRUE)` | `std::env::args().skip(1)` |
+| `args[2]` when it might be missing | `args.get(1)`, returning an `Option` |
+| `message()` | `eprintln!` |
+| `quit(status = 1)` | `std::process::exit(1)`, or `main()` returning `Err` |
+| optparse and similar packages | `clap`, with `#[derive(Parser)]` |
+| Arguments checked by hand | Arguments checked by their types |
+| `--help` written by hand | Help generated from `///` comments |
+| A script that needs R installed | A standalone executable |

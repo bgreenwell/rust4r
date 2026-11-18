@@ -1,0 +1,293 @@
+# Errors {#sec-errors}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R has one mechanism for failure: `stop()` signals an error, and the error travels up through every caller until a `tryCatch()` handles it or R reports it at the top level. Rust has two. A *panic*, which @sec-types and @sec-drop showed, is for bugs: states the program wasn't written to handle. Failures that a program should expect, such as text that isn't a number, are ordinary values of type `Result`, returned by the function that failed. The caller handles the error or passes it on with the `?` operator, and the function's signature says which it might have to do. This chapter covers `Result`, `?`, error types of your own, and where warnings and `try()` fit. The matching chapter of the Rust book is "Error Handling" [@rustbook, chap. 9].
+
+## Errors as values
+
+Converting text to a number can fail. R returns `NA` with a warning:
+
+```{r}
+#| label: r-parse
+as.numeric("2.5")
+as.numeric("twelve")
+```
+
+Rust's `parse()` returns a `Result`:
+
+```{rust}
+#| label: rust-parse
+println!("{:?}", "2.5".parse::<f64>());
+println!("{:?}", "twelve".parse::<f64>());
+
+match "twelve".parse::<f64>() {
+    Ok(x) => println!("got {x}"),
+    Err(e) => println!("error: {e}"),
+}
+```
+
+Rust's `Result<T, E>` is an enum with two variants: `Ok`, holding a value of type `T`, and `Err`, holding an error of type `E`. It's built the way `Option` is (@sec-missingness), with `Err` in place of `None` and an explanation inside. You've seen it before: @sec-types printed the results of `parse()`, and the constructors in @sec-s4 returned `Result<Normal, String>`. Handling one uses the same tools as `Option`: `match` (@sec-enums), `if let`, `unwrap_or()`, and `expect()`. Printed with `{}`, `parse()`'s error says "invalid float literal".
+
+::: {.callout-note title="An R habit to drop in Rust"}
+In R, `as.numeric("twelve")` doesn't stop. It produces an `NA`, and the warning is easy to miss, especially when it scrolls past in a long script or is converted inside a larger computation. Rust's `parse()` gives you no number at all until you've decided what happens when there isn't one.
+:::
+
+## Passing errors up with `?`
+
+Most functions that call something fallible don't handle the error themselves; they pass it to their own caller. In R, that happens without any code. Here the error raised in `parse_number()` passes through `parse_normal()`, which has no code to forward it, and `try()` prints each error so that the later calls still run:
+
+```{r}
+#| label: r-propagate
+parse_number <- function(text) {
+  x <- suppressWarnings(as.numeric(text))
+  if (is.na(x)) stop("'", trimws(text), "' is not a number")
+  x
+}
+
+parse_normal <- function(text) {
+  parts <- strsplit(text, ",")[[1]]
+  if (length(parts) != 2) stop("expected mean, sd")
+  mean <- parse_number(parts[1])
+  sd <- parse_number(parts[2])
+  if (sd <= 0) stop("sd must be positive, not ", sd)
+  list(mean = mean, sd = sd)
+}
+
+str(parse_normal("0, 1"))
+try(parse_normal("0, one"))
+try(parse_normal("0, -1"))
+try(parse_normal("0"))
+```
+
+In Rust, `?` passes an error up:
+
+```{rust}
+#| label: rust-question-mark
+use std::error::Error;
+
+#[derive(Debug)]
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl Normal {
+    fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+        if sd > 0.0 {
+            Ok(Normal { mean, sd })
+        } else {
+            Err(format!("sd must be positive, not {sd}"))
+        }
+    }
+}
+
+fn parse_normal(text: &str) -> Result<Normal, Box<dyn Error>> {
+    let parts: Vec<&str> = text.split(",").collect();
+    if parts.len() != 2 {
+        return Err(Box::from("expected mean, sd"));
+    }
+    let mean: f64 = parts[0].trim().parse()?;
+    let sd: f64 = parts[1].trim().parse()?;
+    let dist = Normal::new(mean, sd)?;
+    Ok(dist)
+}
+
+fn main() {
+    let inputs = vec!["0, 1", "0, one", "0, -1", "0"];
+    for text in inputs {
+        match parse_normal(text) {
+            Ok(dist) => println!("{:?}", dist),
+            Err(e) => println!("error: {e}"),
+        }
+    }
+}
+```
+
+The `?` operator goes after an expression that produces a `Result`. If the result is `Ok`, `?` takes the value out, and the function carries on. If it's `Err`, the function returns that error immediately. The operator works only in a function whose return type can carry the failure: a `Result` for a `Result`, or an `Option` for an `Option`, where `None` returns early. Either way, the possibility of failure shows up in the signature of every function the error passes through.
+
+The return type `Box<dyn Error>` is a trait object (@sec-generics): a boxed value of any type that implements the standard library's `Error` trait. Rust's `parse()` fails with a `ParseFloatError` and `Normal::new()` with a `String`, and `?` converts both into a `Box<dyn Error>` on the way out. The length check builds its error the same way, with `Box::from()`. That makes `Box<dyn Error>` a convenient return type when a function can fail in several ways and its callers only need the message.
+
+The conversions come from the `From` trait, which the standard library implements for any error type and for text. Where no conversion exists, `?` doesn't compile, and `map_err()`, later in this chapter, converts the error by hand.
+
+As when a panic unwinds (@sec-drop), the values a function owns are dropped when `?` returns early, so cleanup still happens. Because `?` is an ordinary return, this holds even in a program built to abort on a panic:
+
+```{rust}
+#| label: rust-question-mark-drop
+# struct Connection {
+#     name: String,
+# }
+#
+# impl Drop for Connection {
+#     fn drop(&mut self) {
+#         println!("closing {}", self.name);
+#     }
+# }
+#
+fn read_sd(text: &str) -> Result<f64, std::num::ParseFloatError> {
+    let conn = Connection { name: String::from("data.csv") };
+    let sd: f64 = text.parse()?;
+    println!("read {sd}");
+    Ok(sd)
+}
+
+fn main() {
+    println!("{:?}", read_sd("one"));
+}
+```
+
+::: {.callout-warning title="Where the analogy breaks"}
+In R, any function can raise an error, and the error passes through every caller that doesn't catch it, whether or not those callers were written with failure in mind. In Rust, a function that can fail says so in its return type, and each caller chooses visibly what to do: handle the error, or pass it on with `?`. Ignoring it by accident draws a compiler warning: calling a function that returns a `Result` and doing nothing with the result gives "unused `Result` that must be used". Ignoring it on purpose takes `let _ =` (@sec-drop).
+:::
+
+## `main()` can return a `Result`
+
+The `main()` function itself can return a `Result`, which lets it use `?`:
+
+```{rust}
+#| label: rust-main-result
+#| error: true
+use std::error::Error;
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let sd: f64 = "one".parse()?;
+    println!("{sd}");
+    Ok(())
+}
+```
+
+When `main()` returns an error, the program prints it, prefixed with `Error:` and in its `{:?}` form, and exits with a nonzero status, as an `Rscript` run that ends in an error does. The empty value, `()`, is written the same way as its type, so `Ok(())` means "succeeded, with nothing to return".
+
+That also explains the `fmt::Result` returned by `fmt()` in @sec-display. It's a `Result<(), fmt::Error>`: writing the text either succeeds with nothing to return or fails with a `fmt::Error`. The `write!` macro returns one, which is why `fmt()` could end with a `write!` call and no semicolon.
+
+## Error types of your own
+
+R conditions have classes, and `tryCatch()` can handle one class of error and let the rest pass. R's `errorCondition()` creates an error with a class and extra fields:
+
+```{r}
+#| label: r-condition-class
+check_sd <- function(sd) {
+  if (sd <= 0) {
+    stop(errorCondition(paste("sd must be positive, not", sd),
+                        class = "invalid_sd", sd = sd))
+  }
+  sd
+}
+
+tryCatch(check_sd(-2), invalid_sd = function(e) {
+  cat("sd", e$sd, "is invalid; using 1\n")
+  1
+})
+```
+
+In Rust, the kinds of error a function can return are the variants of an enum, and handling one kind is a `match` arm:
+
+```{rust}
+#| label: rust-error-enum
+use std::fmt;
+
+#[derive(Debug)]
+enum DistError {
+    NotANumber(String),
+    InvalidSd(f64),
+}
+
+impl fmt::Display for DistError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DistError::NotANumber(text) => {
+                write!(f, "{text:?} is not a number")
+            }
+            DistError::InvalidSd(sd) => {
+                write!(f, "sd must be positive, not {sd}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DistError {}
+
+fn parse_sd(text: &str) -> Result<f64, DistError> {
+    let sd: f64 = text
+        .trim()
+        .parse()
+        .map_err(|_| DistError::NotANumber(text.to_string()))?;
+    if sd > 0.0 {
+        Ok(sd)
+    } else {
+        Err(DistError::InvalidSd(sd))
+    }
+}
+
+fn main() {
+    let inputs = vec!["2", "two", "-2"];
+    for text in inputs {
+        match parse_sd(text) {
+            Ok(sd) => println!("sd = {sd}"),
+            Err(DistError::InvalidSd(sd)) => {
+                println!("sd {sd} is invalid; using 1")
+            }
+            Err(e) => println!("error: {e}"),
+        }
+    }
+}
+```
+
+The pieces:
+
+- `DistError` lists the ways `parse_sd()` can fail, and each variant carries the details, as `sd = sd` added a field to the R condition.
+- `impl fmt::Display` gives each error a message (@sec-display).
+- `impl std::error::Error for DistError {}` makes it a standard error type, so it works with `Box<dyn Error>` and `?` in other functions. The braces are empty because every method of the `Error` trait has a default (@sec-s3-traits).
+- `map_err()` converts one error into another, here the `ParseFloatError` into a `NotANumber` that records the text. Its closure ignores the original error with `_`. Then `?` returns the new error, if there's one.
+- In `main()`, the second arm handles `InvalidSd` by falling back to 1, and the last arm handles everything else, like a `tryCatch()` with an `invalid_sd` handler and an `error` handler.
+
+Because the error type lists every variant, the compiler checks that a `match` covers them all (@sec-enums). R's condition classes can't be checked that way: nothing records which classes a function might signal.
+
+## `panic!` or `Result`?
+
+The Rust book's guidance comes down to whether the failure is a bug [@rustbook, sec. 9.3]. Return a `Result` when failure is something a caller could reasonably handle: bad input, a missing file, a value out of range. Panic when continuing would mean working with a state the code was never meant to be in, which signals a mistake in the program rather than in its input. R has a looser version of the same line: `stopifnot()` for terse, assertion-style checks, and `stop()` for a message aimed at whoever has to fix the input. Both raise ordinary errors that `tryCatch()` can handle.
+
+Rust's `unwrap()` and `expect()` turn a `Result` into a panic: they return the value inside an `Ok` and panic on an `Err`. They suit examples, quick scripts, and places where an error really would be a bug. Of the two, `expect()` is better, because its message says what was expected:
+
+```{rust}
+#| label: rust-expect
+#| error: true
+let sd: f64 = "two".parse().expect("the sd should be a number");
+```
+
+::: {.callout-tip title="The same idea in R"}
+R's `try()` turns an error into a value. It returns the result if the expression succeeds and an object of class `"try-error"` if it fails:
+
+```{r}
+#| label: r-try
+result <- try(log("a"), silent = TRUE)
+class(result)
+inherits(result, "try-error")
+```
+
+That's a `Result` in all but name. The difference is that nothing makes you check which one you got. Code that forgets `inherits(result, "try-error")` carries on with the error object as if it were the answer. A Rust value sits inside the `Ok`, so code can't use it without saying what happens on an `Err`.
+:::
+
+## Warnings
+
+R's `warning()` has no direct counterpart in Rust. A warning lets a function continue while telling someone that something is off, and Rust has no built-in channel for that. A program can print a message to standard error with `eprintln!`, which works like `println!`. A library can return the information instead, for example in a field of the result, so that the caller decides whether to report it. Larger programs use a logging library.
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `stop()` | Return `Err(...)`, or `panic!` for bugs |
+| `as.numeric("x")` gives `NA` and a warning | `parse()` returns a `Result` |
+| Errors pass through callers on their own | `?` passes an error up, visibly |
+| `tryCatch(expr, error = ...)` | `match` on `Ok` and `Err` |
+| `on.exit()` runs on error | Values are dropped when `?` returns |
+| Condition classes, `errorCondition()` | An error enum, matched by variant |
+| A handler for one condition class | A `match` arm for one variant |
+| `try()` returns a `"try-error"` object | `Result`, whose value can't be used until `Err` is handled |
+| `stopifnot()` | `expect()`, or `assert!` (@sec-macros) |
+| `warning()` | `eprintln!`, or information in the result |
+| `Rscript` exits with an error status | `main()` returns `Err` |

@@ -1,0 +1,358 @@
+# Distribution classes in S3, S4, S7, and Rust {#sec-running-class}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+# Each R version below is removed before the next one is defined
+book_objects <- c(ls(), "book_objects")
+```
+
+The book builds one example, a probability distribution, in three of R's object systems and in Rust: S3 starting in @sec-s3-traits, S4 in @sec-s4, S7 in @sec-s7, and Rust throughout Part II. The chapters build each version a piece at a time. This appendix puts each one together, complete, with the same features in all four:
+
+- A normal distribution with a mean and a standard deviation, and a uniform distribution with a minimum and a maximum.
+- A check that rejects invalid parameters: a mean that isn't a single number, a standard deviation that isn't a single positive number, or a minimum that isn't below the maximum.
+- `mean()` and `variance()` for each distribution, and a `std_dev()` that every distribution gets from its `variance()`.
+- A printed form.
+- `+` for two independent normal distributions, whose sum is normal (@sec-operators).
+
+Each version ends with the same demonstration: add two normals, print a uniform with its mean and standard deviation, and try to create an invalid uniform. Where a chapter left a piece out to keep an example short, such as the check in the S3 constructor or the uniform distribution's validity rule and methods in S4 and S7, the version here fills it in.
+
+## S3
+
+An S3 class is a label on a list, set by a constructor function. Generics dispatch on the label when they're called, and `std_dev.default()` serves any object with a `variance()` method:
+
+```{r}
+#| label: r-s3-complete
+normal <- function(mean = 0, sd = 1) {
+  if (length(mean) != 1) stop("mean must be a single number")
+  if (length(sd) != 1 || sd <= 0) stop("sd must be a single positive number")
+  structure(list(mean = mean, sd = sd), class = "normal")
+}
+
+uniform <- function(min = 0, max = 1) {
+  if (length(min) != 1 || length(max) != 1 || min >= max) {
+    stop("min must be less than max")
+  }
+  structure(list(min = min, max = max), class = "uniform")
+}
+
+variance <- function(x, ...) UseMethod("variance")
+std_dev <- function(x, ...) UseMethod("std_dev")
+std_dev.default <- function(x, ...) sqrt(variance(x))
+
+mean.normal <- function(x, ...) x$mean
+variance.normal <- function(x, ...) x$sd^2
+mean.uniform <- function(x, ...) (x$min + x$max) / 2
+variance.uniform <- function(x, ...) (x$max - x$min)^2 / 12
+
+format.normal <- function(x, ...) {
+  paste0("Normal(mean = ", x$mean, ", sd = ", x$sd, ")")
+}
+format.uniform <- function(x, ...) {
+  paste0("Uniform(min = ", x$min, ", max = ", x$max, ")")
+}
+print.normal <- function(x, ...) {
+  cat(format(x), "\n")
+  invisible(x)
+}
+print.uniform <- print.normal
+
+"+.normal" <- function(e1, e2) {
+  normal(e1$mean + e2$mean, sqrt(e1$sd^2 + e2$sd^2))
+}
+```
+
+The demonstration:
+
+```{r}
+#| label: r-s3-demo
+#| error: true
+x <- normal(0, 3)
+y <- normal(1, 4)
+u <- uniform(0, 6)
+x + y
+u
+c(mean = mean(u), sd = std_dev(u))
+uniform(6, 0)
+```
+
+```{r}
+#| label: r-s3-clear
+#| include: false
+rm(list = setdiff(ls(), book_objects))
+```
+
+## S4
+
+An S4 class declares its slots and a validity function. A virtual class, `Distribution`, plays the role of the interface, and the method for `std_dev()` defined on it serves every class that contains it. Because `mean()` already exists in base R, `setMethod()` turns it into an S4 generic, keeping its `(x, ...)` arguments:
+
+```{r}
+#| label: r-s4-complete
+setClass("Distribution", representation("VIRTUAL"))
+
+setClass("Normal", contains = "Distribution",
+  slots = c(mean = "numeric", sd = "numeric"),
+  validity = function(object) {
+    if (length(object@mean) != 1) {
+      "mean must be a single number"
+    } else if (length(object@sd) != 1 || object@sd <= 0) {
+      "sd must be a single positive number"
+    } else {
+      TRUE
+    }
+  }
+)
+
+setClass("Uniform", contains = "Distribution",
+  slots = c(min = "numeric", max = "numeric"),
+  validity = function(object) {
+    if (length(object@min) != 1 || length(object@max) != 1 ||
+        object@min >= object@max) {
+      "min must be less than max"
+    } else {
+      TRUE
+    }
+  }
+)
+
+setGeneric("variance", function(dist) standardGeneric("variance"))
+setGeneric("std_dev", function(dist) standardGeneric("std_dev"))
+setMethod("std_dev", "Distribution", function(dist) sqrt(variance(dist)))
+
+setMethod("mean", "Normal", function(x, ...) x@mean)
+setMethod("variance", "Normal", function(dist) dist@sd^2)
+setMethod("mean", "Uniform", function(x, ...) (x@min + x@max) / 2)
+setMethod("variance", "Uniform", function(dist) (dist@max - dist@min)^2 / 12)
+
+setMethod("show", "Normal", function(object) {
+  cat("Normal(mean = ", object@mean, ", sd = ", object@sd, ")\n", sep = "")
+})
+setMethod("show", "Uniform", function(object) {
+  cat("Uniform(min = ", object@min, ", max = ", object@max, ")\n", sep = "")
+})
+
+setMethod("+", signature("Normal", "Normal"), function(e1, e2) {
+  new("Normal", mean = e1@mean + e2@mean, sd = sqrt(e1@sd^2 + e2@sd^2))
+})
+```
+
+Each `setGeneric()` call prints the name of the new generic. The demonstration:
+
+```{r}
+#| label: r-s4-demo
+#| error: true
+x <- new("Normal", mean = 0, sd = 3)
+y <- new("Normal", mean = 1, sd = 4)
+u <- new("Uniform", min = 0, max = 6)
+x + y
+u
+c(mean = mean(u), sd = std_dev(u))
+new("Uniform", min = 6, max = 0)
+```
+
+```{r}
+#| label: r-s4-clear
+#| include: false
+rm(list = setdiff(ls(), book_objects))
+```
+
+## S7
+
+S7 comes from CRAN (@sec-s7). A class declares typed properties and a validator, which runs on creation and on each `@` assignment. An abstract parent, `distribution`, plays the role of the interface:
+
+```{r}
+#| label: r-s7-complete
+library(S7)
+
+distribution <- new_class("distribution", abstract = TRUE)
+
+normal <- new_class("normal",
+  parent = distribution,
+  properties = list(mean = class_double, sd = class_double),
+  validator = function(self) {
+    if (length(self@mean) != 1) {
+      "@mean must be a single number"
+    } else if (length(self@sd) != 1 || self@sd <= 0) {
+      "@sd must be a single positive number"
+    }
+  }
+)
+
+uniform <- new_class("uniform",
+  parent = distribution,
+  properties = list(min = class_double, max = class_double),
+  validator = function(self) {
+    if (length(self@min) != 1 || length(self@max) != 1 ||
+        self@min >= self@max) {
+      "@min must be less than @max"
+    }
+  }
+)
+
+variance <- new_generic("variance", "dist")
+std_dev <- new_generic("std_dev", "dist")
+method(std_dev, distribution) <- function(dist) sqrt(variance(dist))
+
+method(mean, normal) <- function(x, ...) x@mean
+method(variance, normal) <- function(dist) dist@sd^2
+method(mean, uniform) <- function(x, ...) (x@min + x@max) / 2
+method(variance, uniform) <- function(dist) (dist@max - dist@min)^2 / 12
+
+method(print, normal) <- function(x, ...) {
+  cat("Normal(mean = ", x@mean, ", sd = ", x@sd, ")\n", sep = "")
+  invisible(x)
+}
+method(print, uniform) <- function(x, ...) {
+  cat("Uniform(min = ", x@min, ", max = ", x@max, ")\n", sep = "")
+  invisible(x)
+}
+
+method(`+`, list(normal, normal)) <- function(e1, e2) {
+  normal(mean = e1@mean + e2@mean, sd = sqrt(e1@sd^2 + e2@sd^2))
+}
+```
+
+The demonstration:
+
+```{r}
+#| label: r-s7-demo
+#| error: true
+x <- normal(mean = 0, sd = 3)
+y <- normal(mean = 1, sd = 4)
+u <- uniform(min = 0, max = 6)
+x + y
+u
+c(mean = mean(u), sd = std_dev(u))
+uniform(min = 6, max = 0)
+```
+
+## Rust
+
+The Rust version is the program that ends @sec-s7. The fields have no `pub`, and the types live in a module, so code outside the module, such as `main()`, can't reach them. That code gets every value from a validating `new()` or from `+`, which uses `hypot()` to keep the standard deviation positive (@sec-s7). The trait is the interface, `std_dev()` is its default method, and the compiler checks that every implementation supplies the required methods before the program runs:
+
+```{rust}
+#| label: rust-running-class-complete
+mod distributions {
+    use std::fmt;
+    use std::ops::Add;
+
+    pub trait Distribution {
+        fn mean(&self) -> f64;
+        fn variance(&self) -> f64;
+
+        fn std_dev(&self) -> f64 {
+            self.variance().sqrt()
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Normal {
+        mean: f64,
+        sd: f64,
+    }
+
+    impl Normal {
+        pub fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+            if sd > 0.0 {
+                Ok(Normal { mean, sd })
+            } else {
+                Err(format!("sd must be positive, not {sd}"))
+            }
+        }
+    }
+
+    impl Distribution for Normal {
+        fn mean(&self) -> f64 {
+            self.mean
+        }
+
+        fn variance(&self) -> f64 {
+            self.sd * self.sd
+        }
+    }
+
+    impl fmt::Display for Normal {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "Normal(mean = {}, sd = {})", self.mean, self.sd)
+        }
+    }
+
+    impl Add for Normal {
+        type Output = Normal;
+
+        fn add(self, other: Normal) -> Normal {
+            Normal {
+                mean: self.mean + other.mean,
+                sd: self.sd.hypot(other.sd),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Uniform {
+        min: f64,
+        max: f64,
+    }
+
+    impl Uniform {
+        pub fn new(min: f64, max: f64) -> Result<Uniform, String> {
+            if min < max {
+                Ok(Uniform { min, max })
+            } else {
+                Err(format!(
+                    "min must be less than max, not {min} and {max}"
+                ))
+            }
+        }
+    }
+
+    impl Distribution for Uniform {
+        fn mean(&self) -> f64 {
+            (self.min + self.max) / 2.0
+        }
+
+        fn variance(&self) -> f64 {
+            (self.max - self.min).powi(2) / 12.0
+        }
+    }
+
+    impl fmt::Display for Uniform {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "Uniform(min = {}, max = {})", self.min, self.max)
+        }
+    }
+}
+
+use distributions::{Distribution, Normal, Uniform};
+
+fn main() {
+    let x = Normal::new(0.0, 3.0).expect("valid parameters");
+    let y = Normal::new(1.0, 4.0).expect("valid parameters");
+    let u = Uniform::new(0.0, 6.0).expect("valid parameters");
+
+    println!("x + y = {}", x + y);
+    println!("{u}: mean {}, sd {}", u.mean(), u.std_dev());
+
+    if let Err(message) = Uniform::new(6.0, 0.0) {
+        println!("rejected: {message}");
+    }
+}
+```
+
+Part V builds on this program. @sec-crates moves the trait and `Normal` into a module file of their own, `src/distributions.rs`, and @sec-capstone makes `Display` honor a precision such as `{:.2}`. @sec-extending-r compiles that file into an R package and fits a `Normal` to R data with it.
+
+## Side by side
+
+| | S3 | S4 | S7 | Rust |
+|------------|------------|------------|------------|------------|
+| Class | A constructor and `structure()` | `setClass()` with slots | `new_class()` with properties | `struct` with fields |
+| Validity | Checks in the constructor | `validity`, run by `new()` | `validator`, run on creation and on each `@` assignment | `new()` returns a `Result`; fields are private |
+| Interface | Generics, by convention | A virtual class | An abstract class | A trait |
+| Methods | `UseMethod()` and `generic.class()` | `setGeneric()` and `setMethod()` | `new_generic()` and `method()` | Trait methods in an `impl` |
+| Shared method | A `.default` method | A method for the virtual class | A method for the abstract parent | A default trait method |
+| Printing | `format()` and `print()` methods | A `show()` method | A `print()` method | `impl fmt::Display` |
+| `+` | `"+.normal"` | `setMethod("+", ...)` | ``method(`+`, ...)`` | `impl Add` |
+| A required method left out | Fails when called | Fails when called | Fails when called | Fails to compile |
+
+@sec-concept-map collects the pairings from the rest of the book.

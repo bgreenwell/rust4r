@@ -1,0 +1,236 @@
+# Copy-on-modify vs ownership {#sec-ownership}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+In R, `y <- x` gives you two variables that behave like separate copies: change `y`, and `x` stays as it was. R gets there without copying anything at the assignment. Both names refer to the same value until one of them is changed, and only then does R make the copy. Environments, and the Reference Classes built on them, are the exception, because two names for one environment see each other's changes (@sec-environments). Rust has no hidden copies: `let y = x;` *moves* the value, so `y` becomes its owner and `x` can no longer be used. A copy happens only when the code asks for one with `.clone()`, or when the type implements the `Copy` trait, as numbers do. This chapter uses R's `tracemem()` to show when R copies, then works through Rust's moves, clones, and copies. The matching section of the Rust book is "What is Ownership?" [@rustbook, sec. 4.1].
+
+## When R copies
+
+R's `tracemem()` marks a value so that a message is printed whenever it's copied. It needs a build of R with memory profiling turned on, which the CRAN builds for macOS and Windows have; `capabilities("profmem")` tells you whether yours does.
+
+Here a traced vector, `x`, gets a second name, `y`, and then `y` changes twice:
+
+```{r}
+#| label: r-tracemem
+x <- c(1, 2, 3)
+tracemem(x)
+y <- x
+y[1] <- 10
+y[2] <- 20
+x
+y
+```
+
+Calling `tracemem()` prints the vector's address in memory. The assignment `y <- x` copies nothing; both names now refer to the same vector. The copy happens at `y[1] <- 10`, the first change, and the message shows the old address and the new one. The second change, `y[2] <- 20`, makes no copy, because by then `y` has a vector of its own. Since R 4.0.0, R decides this by counting the references to each value: a value with more than one has to be copied before it can be changed [@r-exts, sec. 5.9.12].
+
+Function arguments work the same way. Inside a function, the argument refers to the caller's value until the function changes it:
+
+```{r}
+#| label: r-tracemem-function
+total <- function(v) sum(v)
+
+double_first <- function(v) {
+  v[1] <- v[1] * 2
+  v
+}
+
+z <- c(1, 2, 3)
+tracemem(z)
+total(z)
+w <- double_first(z)
+z
+```
+
+Here `total()` only reads its argument, so it copies nothing. Because `double_first()` changes its argument, R copies the vector first, and the message names the function where the copy was made. The caller's `z` is unchanged. That's why an R function can't change a vector that belongs to its caller: the change is made to a copy.
+
+## Moves
+
+In Rust, assigning a vector to another variable moves it:
+
+```{rust}
+#| label: rust-move
+#| error: true
+let x = vec![1.0, 2.0, 3.0];
+let y = x;
+println!("{:?}", y);
+println!("{:?}", x);
+```
+
+The line `let y = x;` hands the vector from `x` to `y`. After the move, `x` holds nothing, and the compiler rejects the last line. The message calls that use a *borrow* because `println!` borrows the values it prints rather than taking them over; @sec-borrowing covers borrowing.
+
+A move doesn't copy the elements. A `Vec` is a small record of three numbers: where its elements are stored, how many there are, and how much room is reserved for them. The elements themselves live in a separate block of memory [@rustbook, sec. 4.1]. A move copies the record and leaves the elements where they are, so it costs about as much as R's `y <- x`. What differs is what you can do afterward.
+
+Ownership comes down to three rules [@rustbook, sec. 4.1]:
+
+- Each value has an owner, usually the variable that holds it.
+- A value has one owner at a time.
+- When the owner goes out of scope, usually at the closing brace of the block that declared it, the value is dropped and its memory is freed. @sec-drop shows how to run your own code at that point.
+
+::: {.callout-warning title="Where the analogy breaks"}
+R's `y <- x` and Rust's `let y = x;` are both cheap, because neither copies the elements. After R's assignment, both names still work, and R copies later if one of them changes. After Rust's, only `y` works, and nothing is ever copied behind your back.
+:::
+
+## Copying on purpose with `clone()`
+
+When you want two independent vectors, ask for a copy:
+
+```{rust}
+#| label: rust-clone
+let x = vec![1.0, 2.0, 3.0];
+let mut y = x.clone();
+y[0] = 10.0;
+println!("{:?}", x);
+println!("{:?}", y);
+```
+
+Calling `.clone()` copies the vector, elements and all, which gives the same result as R's copy-on-modify. The timing is different. R copies at the first change, and only if a change happens. A clone is made immediately, whether or not either vector is changed later.
+
+The bigger difference is where the copies are visible. R needs `tracemem()` because its copies don't show in the code. In Rust, copying a vector or a string takes a call you can see, usually `.clone()`, so finding the copies in a program is a matter of reading it.
+
+## Moving into a function
+
+Passing a vector to a function moves it, too:
+
+```{rust}
+#| label: rust-move-function
+#| error: true
+fn total(values: Vec<f64>) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..values.len() {
+        sum = sum + values[i];
+    }
+    sum
+}
+
+fn main() {
+    let x = vec![1.0, 2.0, 3.0];
+    println!("{}", total(x));
+    println!("{:?}", x);
+}
+```
+
+The call `total(x)` moves the vector into the argument `values`. The function owns it from then on and drops it when it returns, so `x` is gone by the last line. The compiler suggests two fixes: clone the vector, or change `total()` to borrow it. Borrowing is the usual answer. It's why `total()` in @sec-vectors took a slice, `&[i32]`, and it's the subject of @sec-borrowing.
+
+A `for` loop over a vector moves it as well. The doubling loop in @sec-vectors, `for value in v`, took ownership of `v`, so `v` couldn't be used after the loop; `for value in &v` would have borrowed it instead.
+
+## Passing ownership back
+
+R code changes a variable by passing it to a function and assigning the result back, `x <- f(x)`, because the function can't change the caller's copy. Here `clamp()` limits each value to a range:
+
+```{r}
+#| label: r-clamp
+clamp <- function(values, lower, upper) {
+  for (i in seq_along(values)) {
+    if (values[i] < lower) values[i] <- lower
+    if (values[i] > upper) values[i] <- upper
+  }
+  values
+}
+
+x <- c(-2, 0.5, 3)
+tracemem(x)
+x <- clamp(x, 0, 1)
+x
+```
+
+R copies the vector once, at the first change inside `clamp()`. A Rust function can take ownership, change the value, and hand it back:
+
+```{rust}
+#| label: rust-clamp
+fn clamp(mut values: Vec<f64>, lower: f64, upper: f64) -> Vec<f64> {
+    for i in 0..values.len() {
+        if values[i] < lower {
+            values[i] = lower;
+        }
+        if values[i] > upper {
+            values[i] = upper;
+        }
+    }
+    values
+}
+
+fn main() {
+    let mut x = vec![-2.0, 0.5, 3.0];
+    x = clamp(x, 0.0, 1.0);
+    println!("{:?}", x);
+}
+```
+
+Declaring the argument as `mut values` lets the function change it, the way `let mut` does for a variable. In `main()`, `x = clamp(x, 0.0, 1.0)` moves the vector into `clamp()` and stores the returned vector back in `x`, so `x` has to be declared `mut`. Assigning a new value to a variable that has been moved from is allowed; only reading it isn't.
+
+::: {.callout-tip title="The same idea in R"}
+R code changes a variable with `x <- f(x)`, and a Rust function that takes ownership and returns it has the same shape. The R version copies the vector once inside `clamp()`. The Rust version moves the vector in and back out and copies nothing.
+:::
+
+## Types that copy
+
+Numbers don't move:
+
+```{rust}
+#| label: rust-copy
+#[derive(Debug, Clone, Copy)]
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+fn main() {
+    let a = 5;
+    let b = a;
+    println!("{a} {b}");
+
+    let x = Normal { mean: 0.0, sd: 1.0 };
+    let y = x;
+    println!("{:?} {:?}", x, y);
+}
+```
+
+Integers, floating-point numbers, booleans, and characters implement the `Copy` trait. Rust copies a value of a `Copy` type instead of moving it, so both variables stay usable. Copying one of these duplicates a few bytes and leaves nothing to clean up, so the standard library makes them `Copy`. A `&` reference without `mut`, which @sec-borrowing calls a *shared reference*, is `Copy` too, so the `&str` arguments in @sec-strings never moved. A struct isn't `Copy` unless it opts in, usually by deriving `Copy`, and it can opt in only when every field is `Copy`, as the `Normal` in @sec-operators did.
+
+A struct with a `String` or a `Vec` field can't be `Copy`:
+
+```{rust}
+#| label: rust-copy-error
+#| error: true
+#[derive(Clone, Copy)]
+struct Sample {
+    name: String,
+    values: Vec<f64>,
+}
+
+fn main() {}
+```
+
+Copying a `Vec`'s small record would leave two owners of the same elements, and each would free them when it went out of scope. Deriving `Clone` on its own is allowed. It gives `Sample` a `.clone()` that copies every field, the elements of `values` included.
+
+| Kind | Types | What happens |
+|--------------|-----------------------------|-----------------------------|
+| Move | `Vec`, `String`, and structs that aren't `Copy` | `let y = x;` moves the value, and only `y` can be used |
+| Copy | Numbers, `bool`, `char`, `&str`, and structs that derive `Copy` | `let y = x;` copies the value, and both can be used |
+| Clone | Types that implement or derive `Clone` | `let y = x.clone();` makes a copy, which for a `Vec` or `String` includes the elements |
+
+Not every clone copies the data behind a value, though. @sec-environments introduces `Rc`, whose clone adds an owner to the same value instead of copying it.
+
+## When memory is freed
+
+R frees memory when its garbage collector finds values that nothing refers to anymore, at a time R chooses. Rust has no garbage collector. Because every value has exactly one owner, the compiler knows where each owner goes out of scope and puts the code that frees the value there [@rustbook, sec. 4.1]. Assigning a new value to a variable drops the value it held at that point, if it still holds one. A vector that moves into a function is freed when that function returns, unless the function hands it back.
+
+::: {.callout-note title="Package developer notes: copying in C code" collapse="true"}
+The `.Call()` interface passes R objects to C without copying them. C code that changes an argument in place therefore changes the caller's value too, unless it copies the argument first with `Rf_duplicate()`. *Writing R Extensions* puts that job on the author of the C code and recommends the `MAYBE_SHARED()` family of macros for deciding whether a copy is needed [@r-exts, sec. 5.9.12]. That's copy-on-modify done by hand. Rust code called from R faces the same question, because the vector still belongs to R (@sec-extending-r).
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `y <- x` shares the value until one changes | `let y = x;` moves a `Vec`; `x` can't be used |
+| `tracemem()` finds the hidden copies | Copies are visible, usually as `.clone()` |
+| A shared vector is copied at its first change, if there's one | `.clone()` copies immediately |
+| A function that changes an argument changes a copy | Passing a `Vec` by value moves it into the function |
+| `x <- f(x)` | `x = f(x)`, moving in and back out |
+| Numbers follow copy-on-modify like any other vector | Numbers and other `Copy` types are copied, never moved |
+| The garbage collector frees memory | Memory is freed when the owner goes out of scope |

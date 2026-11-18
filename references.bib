@@ -1,0 +1,274 @@
+% Conventions: versions go in `version` (or `edition` for the
+% Rust book), not `note`, which the Chicago style drops. Web sources carry
+% `urldate`. Entries for R, knitr, and S7 come from citation(); Quarto's from
+% its CITATION.cff.
+
+@book{rustbook,
+  author  = {Klabnik, Steve and Nichols, Carol and Krycho, Chris},
+  title   = {The {Rust} Programming Language},
+  edition = {Online edition for Rust 1.97},
+  year    = {2026},
+  url     = {https://doc.rust-lang.org/book/},
+  urldate = {2026-11-11}
+}
+
+@manual{rust-std,
+  author  = {{The Rust Project Developers}},
+  title   = {The {Rust} Standard Library},
+  version = {1.99.1},
+  date    = {2026-10-13},
+  url     = {https://doc.rust-lang.org/std/},
+  urldate = {2026-11-11}
+}
+
+% Cited by title, like rustup: an author here would give a second
+% "The Rust Project Developers 2026" next to rust-std.
+@manual{rust-reference,
+  title   = {The {Rust} Reference},
+  version = {1.99.1},
+  date    = {2026-10-13},
+  url     = {https://doc.rust-lang.org/reference/},
+  urldate = {2026-11-13}
+}
+
+@online{rust185,
+  author  = {{The Rust Release Team}},
+  title   = {Announcing {Rust} 1.85.0 and {Rust} 2024},
+  date    = {2025-02-20},
+  url     = {https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/},
+  urldate = {2026-11-11}
+}
+
+@manual{r-intro,
+  author       = {Venables, W. N. and Smith, D. M. and {R Core Team}},
+  title        = {An Introduction to {R}},
+  organization = {R Foundation for Statistical Computing},
+  version      = {4.6.2},
+  date         = {2026-10-29},
+  url          = {https://cran.r-project.org/doc/manuals/r-release/R-intro.html},
+  urldate      = {2026-11-11}
+}
+
+@manual{r-exts,
+  author       = {{R Core Team}},
+  title        = {Writing {R} Extensions},
+  organization = {R Foundation for Statistical Computing},
+  version      = {4.6.2},
+  date         = {2026-10-29},
+  url          = {https://cran.r-project.org/doc/manuals/r-release/R-exts.html},
+  urldate      = {2026-11-11}
+}
+
+@manual{r-lang,
+  author       = {{R Core Team}},
+  title        = {{R}: A Language and Environment for Statistical Computing},
+  organization = {R Foundation for Statistical Computing},
+  address      = {Vienna, Austria},
+  version      = {4.5.2},
+  year         = {2025},
+  url          = {https://www.R-project.org/}
+}
+
+@manual{knitr,
+  author  = {Xie, Yihui},
+  title   = {{knitr}: A General-Purpose Package for Dynamic Report Generation in {R}},
+  version = {1.51},
+  year    = {2025},
+  url     = {https://yihui.org/knitr/}
+}
+
+@manual{s7,
+  author  = {Vaughan, Davis and Hester, Jim and Kalinowski, Tomasz and Landau, Will and Lawrence, Michael and Maechler, Martin and Tierney, Luke and Wickham, Hadley},
+  title   = {{S7}: An Object Oriented System Meant to Become a Successor to {S3} and {S4}},
+  version = {0.2.2},
+  year    = {2026},
+  url     = {https://CRAN.R-project.org/package=S7},
+  doi     = {10.32614/CRAN.package.S7}
+}
+
+@manual{quarto,
+  author  = {Allaire, J. J. and Teague, Charles and Scheidegger, Carlos and Xie, Yihui and Dervieux, Christophe and Woodhull, Gordon},
+  title   = {Quarto},
+  version = {1.11.9},
+  year    = {2026},
+  url     = {https://github.com/quarto-dev/quarto-cli},
+  doi     = {10.5281/zenodo.5960048}
+}
+
+@manual{csv,
+  author  = {Gallant, Andrew},
+  title   = {{csv}: Fast {CSV} Parsing with Support for {Serde}},
+  version = {1.4.0},
+  date    = {2025-10-17},
+  url     = {https://docs.rs/csv/1.4.0/csv/},
+  urldate = {2026-11-11}
+}
+
+@manual{serde,
+  author  = {Tryzelaar, Erick and Tolnay, David},
+  title   = {{serde}: A Generic Serialization/Deserialization Framework},
+  version = {1.0.229},
+  date    = {2026-07-18},
+  url     = {https://serde.rs},
+  urldate = {2026-11-11}
+}
+
+@manual{clap,
+  title   = {{clap}: A Simple to Use, Efficient, and Full-Featured Command Line Argument Parser},
+  version = {4.6.7},
+  date    = {2026-09-14},
+  url     = {https://docs.rs/clap/4.6.7/clap/},
+  urldate = {2026-11-11}
+}
+
+@manual{rayon,
+  title   = {{rayon}: Simple Work-Stealing Parallelism for {Rust}},
+  version = {1.12.0},
+  date    = {2026-04-14},
+  url     = {https://docs.rs/rayon/1.12.0/rayon/},
+  urldate = {2026-11-11}
+}
+
+@manual{rand,
+  author  = {{The Rand Project Developers}},
+  title   = {{rand}: Random Number Generators and Other Randomness Functionality},
+  version = {0.10.3},
+  date    = {2026-09-20},
+  url     = {https://docs.rs/rand/0.10.3/rand/},
+  urldate = {2026-11-11}
+}
+
+@online{cran-rust,
+  author  = {{CRAN}},
+  title   = {Using {Rust} in {CRAN} Packages},
+  date    = {2023-07-13},
+  url     = {https://cran.r-project.org/web/packages/using_rust.html},
+  urldate = {2026-11-11}
+}
+
+@article{hyndman1996,
+  author  = {Hyndman, Rob J. and Fan, Yanan},
+  title   = {Sample Quantiles in Statistical Packages},
+  journal = {The American Statistician},
+  volume  = {50},
+  number  = {4},
+  pages   = {361--365},
+  year    = {1996},
+  doi     = {10.1080/00031305.1996.10473566}
+}
+
+@article{welford1962,
+  author  = {Welford, B. P.},
+  title   = {Note on a Method for Calculating Corrected Sums of Squares and Products},
+  journal = {Technometrics},
+  volume  = {4},
+  number  = {3},
+  pages   = {419--420},
+  year    = {1962},
+  doi     = {10.1080/00401706.1962.10490022}
+}
+
+@online{king2019,
+  author  = {King, Alexis},
+  title   = {Parse, don't validate},
+  date    = {2019-11-05},
+  url     = {https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/},
+  urldate = {2026-11-11}
+}
+
+@manual{rextendr,
+  author  = {Wilke, Claus O. and Thomason, Andy and Reimert, Mossa M. and Kosenkov, Ilia and Barrett, Malcolm and Parry, Josiah and Vernon, Kenneth},
+  title   = {{rextendr}: Build '{Rust}' Powered '{R}' Packages},
+  version = {0.5.0},
+  year    = {2026},
+  url     = {https://CRAN.R-project.org/package=rextendr},
+  doi     = {10.32614/CRAN.package.rextendr}
+}
+@manual{usethis,
+  author  = {Wickham, Hadley and Bryan, Jennifer and Barrett, Malcolm and Teucher, Andy},
+  title   = {{usethis}: Automate Package and Project Setup},
+  version = {3.2.1},
+  year    = {2025},
+  url     = {https://CRAN.R-project.org/package=usethis},
+  doi     = {10.32614/CRAN.package.usethis}
+}
+@manual{devtools,
+  author  = {Wickham, Hadley and Hester, Jim and Chang, Winston and Bryan, Jennifer},
+  title   = {{devtools}: Tools to Make Developing {R} Packages Easier},
+  version = {2.5.1},
+  year    = {2026},
+  url     = {https://CRAN.R-project.org/package=devtools},
+  doi     = {10.32614/CRAN.package.devtools}
+}
+@article{extendr2024,
+  author  = {Reimert, Mossa Merhi and Parry, Josiah D. and Denwood, Matt and Gussmann, Maya Katrin and Wilke, Claus O. and Kosenkov, Ilia and Milton, Michael and Thomason, Amy},
+  title   = {{extendr}: Frictionless Bindings for {R} and {Rust}},
+  journal = {Journal of Open Source Software},
+  volume  = {9},
+  number  = {99},
+  pages   = {6394},
+  year    = {2024},
+  doi     = {10.21105/joss.06394}
+}
+@manual{rustup,
+  title   = {The {rustup} Book},
+  year    = {2026},
+  url     = {https://rust-lang.github.io/rustup/},
+  urldate = {2026-11-12}
+}
+
+@manual{rustc-book,
+  title   = {The {rustc} Book},
+  version = {1.99.1},
+  date    = {2026-10-13},
+  url     = {https://doc.rust-lang.org/rustc/},
+  urldate = {2026-11-14}
+}
+
+@manual{cargo-book,
+  title   = {The {Cargo} Book},
+  version = {1.99.1},
+  date    = {2026-10-13},
+  url     = {https://doc.rust-lang.org/cargo/},
+  urldate = {2026-11-14}
+}
+
+@manual{clippy-book,
+  title   = {{Clippy} Documentation},
+  version = {0.1.99},
+  date    = {2026-10-13},
+  url     = {https://doc.rust-lang.org/clippy/},
+  urldate = {2026-11-14}
+}
+
+@online{claude-code-memory,
+  title        = {How {Claude} Remembers Your Project},
+  organization = {Anthropic},
+  year         = {2026},
+  url          = {https://code.claude.com/docs/en/memory},
+  urldate      = {2026-11-14}
+}
+
+@online{claude-code-skills,
+  title        = {Extend {Claude} with Skills},
+  organization = {Anthropic},
+  year         = {2026},
+  url          = {https://code.claude.com/docs/en/skills},
+  urldate      = {2026-11-14}
+}
+
+@online{codex-agents-md,
+  title        = {Custom Instructions with {AGENTS.md}},
+  organization = {OpenAI},
+  year         = {2026},
+  url          = {https://learn.chatgpt.com/docs/agent-configuration/agents-md},
+  urldate      = {2026-11-14}
+}
+
+@online{codex-skills,
+  title        = {Build Skills},
+  organization = {OpenAI},
+  year         = {2026},
+  url          = {https://learn.chatgpt.com/docs/build-skills},
+  urldate      = {2026-11-14}
+}

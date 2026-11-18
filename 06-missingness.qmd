@@ -1,0 +1,271 @@
+# Missingness {#sec-missingness}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R builds missing values into most of its vector types. Logical, integer, double, complex, and character vectors can all hold `NA`, and "in general any operation on an `NA` becomes an `NA`" [@r-intro, sec. 2.5]. Rust has no `NA`. An `i32` always holds an integer, and an `f64` always holds a floating-point value, though that value can be `NaN`. A value that might be absent has a different type, `Option`, and the compiler won't let you use it as if the value were there. This chapter compares `NA` with `Option`, shows how to get a value out of an `Option`, and maps R's `NULL` onto `Option` for optional arguments. The matching sections of the Rust book are "Defining an Enum", which introduces `Option`, and "Concise Control Flow with `if let` and `let...else`" [@rustbook, secs. 6.1, 6.3].
+
+## `NA` in R
+
+R has a separate `NA` for each vector type that can hold one. Plain `NA` is logical, and the other four have their own names:
+
+```{r}
+#| label: r-na-types
+typeof(NA)
+typeof(NA_integer_)
+typeof(NA_real_)
+typeof(NA_complex_)
+typeof(NA_character_)
+```
+
+Each one is a value of its own type that R sets aside as a marker. @sec-types showed that `NA_integer_` is the smallest 32-bit integer. R's `NA_real_` is a special kind of `NaN` [@r-exts, sec. 5.10.3].
+
+Because `NA` is a value of the vector's own type, arithmetic accepts it and passes it along:
+
+```{r}
+#| label: r-na-propagates
+NA + 1
+NA > 1
+mean(c(1, NA, 3))
+```
+
+Nothing stops the calculation; the `NA` flows through to the result.
+
+## `Option` in Rust
+
+Rust writes a value that might be missing as an `Option`. An `Option<f64>` is either `Some` with an `f64` inside, or `None`:
+
+```{rust}
+#| label: rust-option
+let reading: Option<f64> = Some(21.5);
+let missing: Option<f64> = None;
+println!("{:?}", reading);
+println!("{:?}", missing);
+```
+
+The annotation on `missing` is required. The value `None` on its own doesn't say what kind of value is missing, and the compiler needs to know.
+
+You've already seen `Option` twice. In @sec-vectors, `v.get(3)` returned `None` for a position past the end of a vector, and in @sec-types, `checked_add()` returned `None` when a sum overflowed. Both functions use `Option` to say "there may be no answer", and both make that visible in the type they return.
+
+## An `Option` is not a number
+
+An `Option<f64>` is not an `f64`, so you can't pass one where an `f64` is expected:
+
+```{rust}
+#| label: rust-option-mismatch
+#| error: true
+fn to_fahrenheit(celsius: f64) -> f64 {
+    celsius * 1.8 + 32.0
+}
+
+fn main() {
+    let reading: Option<f64> = Some(21.5);
+    println!("{}", to_fahrenheit(reading));
+}
+```
+
+Arithmetic fails the same way: `reading + 1.0` doesn't compile either. This is the central difference from R. In R, `NA` flows silently through a calculation. In Rust, a missing value stops at the first place that needs a real number, and you decide there what should happen.
+
+## Getting the value out
+
+In R, you check with `is.na()` before using a value. Rust's most direct tool is `if let`, which runs a block only when there's a value and gives that value a name:
+
+```{r}
+#| label: r-if-na
+reading <- 21.5
+if (!is.na(reading)) {
+  cat("reading:", reading, "\n")
+} else {
+  cat("no reading\n")
+}
+```
+
+```{rust}
+#| label: rust-if-let
+let reading: Option<f64> = Some(21.5);
+if let Some(value) = reading {
+    println!("reading: {value}");
+} else {
+    println!("no reading");
+}
+```
+
+The pattern `if let Some(value) = reading` reads as "if `reading` is a `Some`, call the value inside it `value`". Inside the first block, `value` is a plain `f64`. Outside it, there's no `value` to misuse.
+
+When a missing value should be replaced with a default, `unwrap_or()` is shorter. Rust's `is_none()` and `is_some()` answer the yes-or-no question that `is.na()` answers in R:
+
+```{r}
+#| label: r-replace-na
+reading <- NA_real_
+is.na(reading)
+ifelse(is.na(reading), 0, reading)
+```
+
+```{rust}
+#| label: rust-unwrap-or
+let reading: Option<f64> = None;
+println!("{}", reading.is_none());
+println!("{}", reading.unwrap_or(0.0));
+```
+
+Rust computes the default before calling `unwrap_or()`, even when the value is there. That's harmless for `0.0`; for a default that's expensive to compute, @sec-closures introduces `unwrap_or_else()`, which computes it only when needed.
+
+Finally, `expect()` takes the value out and stops the program with a panic if there isn't one. Use it when a missing value would mean a bug, the way you might use `stopifnot(!is.na(x))` in R:
+
+```{rust}
+#| label: rust-expect
+#| error: true
+let reading: Option<f64> = None;
+println!("{}", reading.expect("sensor returned no reading"));
+```
+
+The message passed to `expect()` is what appears in the panic. A method called `unwrap()` does the same thing with a generic message. The compiler's suggestion in the earlier error was to call `expect()`, but that's only the right fix when `None` can't happen. @sec-enums covers `match`, the general tool for handling every case of an `Option`.
+
+## Missing values in a vector
+
+An R vector with missing values becomes a vector of `Option`s in Rust. R's summary functions take an `na.rm` argument:
+
+```{r}
+#| label: r-na-rm
+readings <- c(1, NA, 3)
+sum(readings, na.rm = TRUE)
+sum(is.na(readings))
+```
+
+In Rust, the loop says what to do with each `None`:
+
+```{rust}
+#| label: rust-na-rm
+let readings = vec![Some(1.0), None, Some(3.0)];
+let mut total = 0.0;
+let mut missing = 0;
+for reading in readings {
+    if let Some(value) = reading {
+        total += value;
+    } else {
+        missing += 1;
+    }
+}
+println!("total {total}, missing {missing}");
+```
+
+The type of `readings` is `Vec<Option<f64>>`, a vector in which every element might be missing. @sec-collections shows a shorter way to keep only the present values, with `filter_map()`.
+
+::: {.callout-note title="An R habit to drop in Rust"}
+In R, a numeric vector you receive might contain `NA`, so careful code checks with `is.na()` or passes `na.rm = TRUE` everywhere. In Rust, the type tells you. A `Vec<f64>` can't contain a missing value, so code that receives one doesn't need to check for missing values; `NaN` is a separate matter, which the next section takes up. Only a `Vec<Option<f64>>` can, and then the compiler makes you handle the `None`s. The checking moves from every function to the one place where missing values can occur.
+:::
+
+## `NaN` is not missing
+
+R distinguishes a missing value, `NA`, from the result of an undefined calculation, `NaN`. R's `is.na()` is true for both, and `is.nan()` only for `NaN` [@r-intro, sec. 2.5]:
+
+```{r}
+#| label: r-nan
+is.na(c(NA, NaN))
+is.nan(c(NA, NaN))
+```
+
+Rust's `f64` has `NaN` but no `NA`, as @sec-types noted. Wrapping the value in an `Option` restores the distinction: `None` means the value was never recorded, and `Some(f64::NAN)` means it was computed and came out undefined:
+
+```{rust}
+#| label: rust-nan
+let never_recorded: Option<f64> = None;
+let undefined: Option<f64> = Some(f64::NAN);
+println!("{:?}", never_recorded);
+println!("{:?}", undefined);
+```
+
+::: {.callout-warning title="Where the analogy breaks"}
+R's `na.rm = TRUE` removes `NaN` as well as `NA`, because `is.na()` is true for both. The loop in the previous section skips only `None`, so a `Some(f64::NAN)` would make its total `NaN`. To match R, skip the values for which `is_nan()` is true as well.
+:::
+
+## Missing logical values
+
+R's logical type has three values: `TRUE`, `FALSE`, and `NA`. Logical operators handle `NA` where they can, but `if` can't:
+
+```{r}
+#| label: r-logical-na
+#| error: true
+NA || TRUE
+NA && FALSE
+if (NA) "yes"
+```
+
+A Rust `bool` has only `true` and `false`. A flag that might be missing is an `Option<bool>`, and `if` won't accept one, so you decide what `None` means first, for example with `flag.unwrap_or(false)`.
+
+::: {.callout-warning title="Where the analogy breaks"}
+R's `NA || TRUE` is `TRUE` because the answer doesn't depend on the missing value. Rust has no rule like that for `Option<bool>`: logical operators only work on `bool`. Any three-valued logic you want, you write yourself.
+:::
+
+## `NULL` and optional arguments
+
+R's `NULL` is a different idea from `NA`. `NA` is a missing element inside a vector; `NULL` is the absence of an object altogether. Its most common use is as the default for an optional argument:
+
+```{r}
+#| label: r-null-argument
+weighted <- function(x, weight = NULL) {
+  if (is.null(weight)) {
+    weight <- 1
+  }
+  x * weight
+}
+weighted(10)
+weighted(10, weight = 2)
+```
+
+In Rust, an optional argument is an `Option`:
+
+```{rust}
+#| label: rust-option-argument
+fn weighted(x: f64, weight: Option<f64>) -> f64 {
+    let w = weight.unwrap_or(1.0);
+    x * w
+}
+
+fn main() {
+    println!("{}", weighted(10.0, None));
+    println!("{}", weighted(10.0, Some(2.0)));
+}
+```
+
+::: {.callout-warning title="Where the analogy breaks"}
+Rust has no default arguments and no named arguments. The caller always passes every argument, in order, so leaving out the weight means writing `None` explicitly.
+:::
+
+R's `NULL` also shows up when you ask a list for an element it doesn't have: `x[["b"]]` on a list without a `b` returns `NULL`. Use `[[` rather than `$` for this: `$` matches partial names, so `x$b` returns an element named `beta`. Rust's hash maps answer the same question with `None` (@sec-collections).
+
+::: {.callout-note title="R refresher: NA, NaN, and NULL" collapse="true"}
+The three behave differently in ways that matter when you translate code:
+
+```{r}
+#| label: r-refresher-null
+length(NA)
+length(NULL)
+c(1, NA, 3)
+c(1, NULL, 3)
+```
+
+`NA` is a value of length one that holds a place in a vector. `NULL` has length zero and disappears when combined with other values. `NaN` is an ordinary double that comes from calculations such as `0/0` [@r-intro, sec. 2.5]. In Rust terms, `NA` is closest to `None` inside a vector of `Option`s, `NULL` is closest to `None` as a whole argument or result, and `NaN` is `f64::NAN`.
+:::
+
+::: {.callout-note title="Package developer notes: NA in compiled code" collapse="true"}
+In C, missing integers, logicals, and strings are detected by comparing with `NA_INTEGER`, `NA_LOGICAL`, and `NA_STRING`. For doubles, `ISNA()` detects `NA`, while `ISNAN()` is true for both `NA` and `NaN` [@r-exts, sec. 5.10.3]. R's `NA_real_` is a `NaN` with a particular bit pattern, so a Rust function that receives R doubles as `f64` values sees `NA` as just another `NaN`: `is_nan()` is true for both. Telling them apart takes the same check `ISNA()` makes. @sec-extending-r shows how Rust code receives R vectors and their missing values.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| Most vector types have an `NA` | Plain types can't be missing; `Option<T>` can |
+| `NA` flows through arithmetic | An `Option` can't be used as a number |
+| `if (!is.na(x))` | `if let Some(value) = x` |
+| `ifelse(is.na(x), 0, x)` | `x.unwrap_or(0.0)` |
+| `is.na(x)` | `x.is_none()` |
+| `stopifnot(!is.na(x))` | `x.expect("message")` |
+| `sum(x, na.rm = TRUE)` | A loop that skips `None`, and `NaN` to match R |
+| `NA` and `NaN` are both `is.na()` | `None` and `Some(f64::NAN)` are different values |
+| `NA || TRUE` is `TRUE` | Logical operators need `bool`; decide what `None` means |
+| `weight = NULL` as a default | `weight: Option<f64>`, passed as `None` |

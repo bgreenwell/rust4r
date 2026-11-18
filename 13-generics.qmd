@@ -1,0 +1,432 @@
+# Generics and dispatch {#sec-generics}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+An R function works with any argument that supports the operations it uses. That's duck typing: if it has a `mean()` method, it's a distribution as far as the function cares, and R finds out whether it does when the function runs. Rust has two ways to write a function that works with many types. A generic function names a type parameter and states what that type must support; the compiler checks every call and writes a separate copy of the function for each type used. A trait object, `dyn Trait`, puts the choice off until the program runs, which makes it the closest thing Rust has to S3, but only types that implement the trait are allowed in. This chapter covers both, using the `Distribution` trait from @sec-s3-traits. The matching sections of the Rust book are "Generic Data Types", "Defining Shared Behavior with Traits", and "Using Trait Objects to Abstract over Shared Behavior" [@rustbook, secs. 10.1, 10.2, 18.2].
+
+## Duck typing in R
+
+The `describe()` function from @sec-s3-traits calls two generics, so it works with any object that has methods for both:
+
+```{r}
+#| label: r-duck
+normal <- function(mean = 0, sd = 1) {
+  structure(list(mean = mean, sd = sd), class = "normal")
+}
+uniform <- function(min = 0, max = 1) {
+  structure(list(min = min, max = max), class = "uniform")
+}
+
+variance <- function(x, ...) UseMethod("variance")
+mean.normal <- function(x, ...) x$mean
+variance.normal <- function(x, ...) x$sd^2
+mean.uniform <- function(x, ...) (x$min + x$max) / 2
+variance.uniform <- function(x, ...) (x$max - x$min)^2 / 12
+
+describe <- function(x) {
+  cat("mean", mean(x), "variance", variance(x), "\n")
+}
+
+describe(normal(0, 2))
+describe(uniform(0, 6))
+```
+
+Nothing in `describe()` says what `x` must be. That's flexible, and it means a wrong argument is discovered only when the call fails somewhere inside.
+
+## Type parameters
+
+@sec-s3-traits wrote the Rust version with `impl Distribution` as the argument type. That's shorthand for a *generic function*, one with a type parameter:
+
+```{rust}
+#| label: rust-type-parameter
+# trait Distribution {
+#     fn mean(&self) -> f64;
+#     fn variance(&self) -> f64;
+# }
+#
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+# struct Uniform {
+#     min: f64,
+#     max: f64,
+# }
+#
+# impl Distribution for Uniform {
+#     fn mean(&self) -> f64 {
+#         (self.min + self.max) / 2.0
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         (self.max - self.min).powi(2) / 12.0
+#     }
+# }
+#
+fn describe<T: Distribution>(dist: T) {
+    println!("mean {}, variance {}", dist.mean(), dist.variance());
+}
+
+fn main() {
+    describe(Normal { mean: 0.0, sd: 2.0 });
+    describe(Uniform { min: 0.0, max: 6.0 });
+}
+```
+
+(The trait and both distributions are the ones from @sec-s3-traits, compiled but not shown.) The `<T: Distribution>` after the name declares a type parameter named `T` and a *trait bound*: whatever type `T` turns out to be, it must implement `Distribution`. The argument `dist` has type `T`. You've used generic types since @sec-vectors without writing one: `Vec<i32>` and `Option<f64>` are the generic types `Vec<T>` and `Option<T>` with `T` filled in.
+
+The long form says something the short form can't. When two arguments share one type parameter, they must have the same type:
+
+```{rust}
+#| label: rust-same-type
+#| error: true
+# trait Distribution {
+#     fn mean(&self) -> f64;
+#     fn variance(&self) -> f64;
+# }
+#
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+# struct Uniform {
+#     min: f64,
+#     max: f64,
+# }
+#
+# impl Distribution for Uniform {
+#     fn mean(&self) -> f64 {
+#         (self.min + self.max) / 2.0
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         (self.max - self.min).powi(2) / 12.0
+#     }
+# }
+#
+fn mean_gap<T: Distribution>(a: T, b: T) -> f64 {
+    a.mean() - b.mean()
+}
+
+fn main() {
+    let normal = Normal { mean: 5.0, sd: 1.0 };
+    let uniform = Uniform { min: 0.0, max: 6.0 };
+    println!("{}", mean_gap(normal, uniform));
+}
+```
+
+The function `mean_gap()` accepts two normals or two uniforms, but not one of each, and the error explains why. With `a: impl Distribution, b: impl Distribution`, each argument would get its own type and the call would compile.
+
+## One copy per type
+
+For each type a generic function is called with, the compiler writes a separate version of the function with `T` replaced by that type, a process called *monomorphization* [@rustbook, sec. 10.1]. The Rust `describe<T>()` from the previous section becomes one version for `Normal` and another for `Uniform`, and each call goes straight to the right one. This is called *static dispatch*, because the choice is made before the program runs.
+
+::: {.callout-warning title="Where the analogy breaks"}
+Static dispatch has no R equivalent. Every S3, S4, and S7 call finds its method at runtime, by looking at classes. A Rust generic function does that work once, at compile time, so a call costs no more than a call to a function written for one type. The cost can be a larger compiled program, with one copy of the function per type, though an optimized build often merges small functions like `describe()` into the code that calls them.
+:::
+
+The compiler usually works out `T` from the arguments. When it can't, you name the type with `::<>`, the "turbofish". You've seen it twice: `"12".parse::<i32>()` in @sec-types, where the text alone doesn't say what kind of number to produce, and `std::any::type_name::<T>()` in the same chapter's `print_type()` helper, which was a generic function all along.
+
+## Trait objects
+
+A list in R can hold objects of different classes, and a loop over it dispatches each call on each element's class:
+
+```{r}
+#| label: r-mixed-list
+dists <- list(normal(0, 2), uniform(0, 6), normal(5, 1))
+for (dist in dists) {
+  describe(dist)
+}
+```
+
+A Rust `Vec` holds one type, so a vector of mixed distributions needs a type that covers all of them. That type is `Box<dyn Distribution>`:
+
+```{rust}
+#| label: rust-dyn
+# trait Distribution {
+#     fn mean(&self) -> f64;
+#     fn variance(&self) -> f64;
+# }
+#
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+# struct Uniform {
+#     min: f64,
+#     max: f64,
+# }
+#
+# impl Distribution for Uniform {
+#     fn mean(&self) -> f64 {
+#         (self.min + self.max) / 2.0
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         (self.max - self.min).powi(2) / 12.0
+#     }
+# }
+#
+fn main() {
+    let dists: Vec<Box<dyn Distribution>> = vec![
+        Box::new(Normal { mean: 0.0, sd: 2.0 }),
+        Box::new(Uniform { min: 0.0, max: 6.0 }),
+        Box::new(Normal { mean: 5.0, sd: 1.0 }),
+    ];
+    for dist in dists {
+        println!("mean {}, variance {}", dist.mean(), dist.variance());
+    }
+}
+```
+
+There are two parts to the type:
+
+- `dyn Distribution` means "a value of some type that implements `Distribution`", without saying which type. It's called a *trait object*.
+- `Box` holds the value somewhere else in memory and keeps a pointer to it. Types that implement `Distribution` can differ in size (a new distribution could have three fields), but every `Box<dyn Distribution>` has the same size, so a `Vec` can hold one after another.
+
+Each call to `dist.mean()` is now dispatched at runtime. The trait object carries a small table of the methods for its actual type, and the call goes through that table. This is *dynamic dispatch* [@rustbook, sec. 18.2], the same idea as S3 finding `mean.normal()` from an object's class.
+
+A function can take a trait object as an argument too, through a reference: `&dyn Distribution`. Here's @sec-multiple-dispatch's `sum_moments()` rewritten that way, so it accepts any two elements of a mixed vector:
+
+```{rust}
+#| label: rust-dyn-argument
+# trait Distribution {
+#     fn mean(&self) -> f64;
+#     fn variance(&self) -> f64;
+# }
+#
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+# struct Uniform {
+#     min: f64,
+#     max: f64,
+# }
+#
+# impl Distribution for Uniform {
+#     fn mean(&self) -> f64 {
+#         (self.min + self.max) / 2.0
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         (self.max - self.min).powi(2) / 12.0
+#     }
+# }
+#
+# #[derive(Debug)]
+# struct Moments {
+#     mean: f64,
+#     variance: f64,
+# }
+#
+fn sum_moments(a: &dyn Distribution, b: &dyn Distribution) -> Moments {
+    Moments {
+        mean: a.mean() + b.mean(),
+        variance: a.variance() + b.variance(),
+    }
+}
+
+fn main() {
+    let dists: Vec<Box<dyn Distribution>> = vec![
+        Box::new(Normal { mean: 0.0, sd: 2.0 }),
+        Box::new(Uniform { min: 0.0, max: 6.0 }),
+    ];
+    println!("{:?}", sum_moments(dists[0].as_ref(), dists[1].as_ref()));
+}
+```
+
+The `as_ref()` method lends out the value inside a box as a `&dyn Distribution` while the vector keeps it; @sec-borrowing covers references like this one. The `impl Distribution` version from @sec-multiple-dispatch doesn't accept these elements, because neither a `Box<dyn Distribution>` nor a `&dyn Distribution` implements the trait itself.
+
+Not every trait can be used as a trait object. The rules are called *dyn compatibility* [@rustbook, sec. 18.2]. A method with its own type parameter, for example, rules a trait out, and `Distribution` has none.
+
+## Trait objects accept only types that implement the trait
+
+What a trait object adds over S3 is a check on what goes in. Only a type that implements the trait can become a `Box<dyn Distribution>`:
+
+```{rust}
+#| label: rust-dyn-guard
+#| error: true
+# trait Distribution {
+#     fn mean(&self) -> f64;
+#     fn variance(&self) -> f64;
+# }
+#
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+# struct Uniform {
+#     min: f64,
+#     max: f64,
+# }
+#
+# impl Distribution for Uniform {
+#     fn mean(&self) -> f64 {
+#         (self.min + self.max) / 2.0
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         (self.max - self.min).powi(2) / 12.0
+#     }
+# }
+#
+struct Poisson {
+    rate: f64,
+}
+
+fn main() {
+    let dists: Vec<Box<dyn Distribution>> = vec![
+        Box::new(Normal { mean: 0.0, sd: 2.0 }),
+        Box::new(Poisson { rate: 2.0 }),
+    ];
+}
+```
+
+Because `Poisson` doesn't implement `Distribution`, it can't go in the vector, and the error lists the types that can. In R, a `poisson` object without methods would go into the list without complaint and fail when `describe()` reached it. With a trait object, every call is guaranteed to find a method, so runtime dispatch can't fail the way it can in S3.
+
+::: {.callout-tip title="The same idea in R"}
+A list of S3 objects that all have methods for the same generics works like a vector of trait objects. The `Distribution` trait writes down what such a list was already relying on: every element has `mean()` and `variance()` methods.
+:::
+
+## Generic implementations
+
+A trait can be implemented for every type that meets a bound at once, using a type parameter in the `impl` itself, a *generic implementation*. This is how @sec-multiple-dispatch's general case would be written: an `Add` for a `Normal` and any distribution, returning `Moments`. Adding a specific `Add` for two normals alongside it fails:
+
+```{rust}
+#| label: rust-overlap
+#| error: true
+# trait Distribution {
+#     fn mean(&self) -> f64;
+#     fn variance(&self) -> f64;
+# }
+#
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+use std::ops::Add;
+
+struct Moments {
+    mean: f64,
+    variance: f64,
+}
+
+impl<T: Distribution> Add<T> for Normal {
+    type Output = Moments;
+
+    fn add(self, other: T) -> Moments {
+        Moments {
+            mean: self.mean() + other.mean(),
+            variance: self.variance() + other.variance(),
+        }
+    }
+}
+
+impl Add<Normal> for Normal {
+    type Output = Normal;
+
+    fn add(self, other: Normal) -> Normal {
+        Normal {
+            mean: self.mean + other.mean,
+            sd: (self.sd * self.sd + other.sd * other.sd).sqrt(),
+        }
+    }
+}
+
+fn main() {}
+```
+
+Since `Normal` implements `Distribution`, the generic implementation already covers `Normal + Normal`, and the specific one would cover it a second time. S4 resolves that situation by picking the more specific method. Rust doesn't choose between overlapping implementations; it refuses to compile them.
+
+## Static or dynamic dispatch
+
+| | Generic function (`<T: Distribution>`) | Trait object (`dyn Distribution`) |
+|----------------|----------------------------|----------------------------|
+| When the method is chosen | At compile time | At runtime |
+| Cost of a call | Same as an ordinary function | One lookup in the method table |
+| A list of mixed types | Not possible | `Vec<Box<dyn Distribution>>` |
+| Closest R equivalent | None | S3 dispatch, restricted to types that implement the trait |
+
+Use a generic function by default, and a trait object when you need a collection of mixed types, or when the type isn't known until the program runs. When the set of types is fixed, an enum is another way to hold a mixed collection; @sec-enums compares the two.
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| Duck typing: any object with the right methods | A trait bound: `<T: Distribution>` |
+| A wrong argument fails inside the function | A wrong argument doesn't compile |
+| S3, S4, and S7 methods are chosen at runtime | Generic functions dispatch at compile time |
+| `list()` of objects with different classes | `Vec<Box<dyn Distribution>>` |
+| Anything can go in a list | Only types that implement the trait |
+| S4 picks the more specific of two methods | Overlapping implementations don't compile |

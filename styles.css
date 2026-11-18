@@ -1,0 +1,10 @@
+/* Language labels on code chunks (set in _common.R). R and Rust examples
+   follow one another, so mark each label with its language's color as well
+   as its name. */
+.code-with-filename:has(pre.sourceCode.r) .code-with-filename-file {
+  border-left: 4px solid #276dc3;
+}
+
+.code-with-filename:has(pre.sourceCode.rust) .code-with-filename-file {
+  border-left: 4px solid #b7410e;
+}

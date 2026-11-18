@@ -1,0 +1,342 @@
+# Scalar types {#sec-types}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+In R you rarely state a type. You write `x <- 1` and R makes `x` a double; you write `x <- 1L` and it makes an integer. If you want to know which, you ask at runtime with `typeof()`. Rust works the other way around. Every value has a type that the compiler knows before the program runs, and code that mixes types without saying how is rejected before it can execute.
+
+This chapter covers the scalar types you'll use most (integers, floating-point numbers, and booleans) and the places where R's quiet conversions become explicit decisions in Rust. Strings and missing values get their own chapters (@sec-strings and @sec-missingness). The matching section of the Rust book is "Data Types" [@rustbook, sec. 3.2].
+
+## Every value has a type
+
+Here's R's `typeof()` on four literals, then a Rust program that prints the types of four similar ones. Compare the first line of each: the same `1` is a double in R but an integer in Rust:
+
+```{r}
+#| label: r-typeof
+typeof(1)
+typeof(1L)
+typeof(TRUE)
+typeof("a")
+```
+
+```{rust}
+#| label: rust-print-type
+fn print_type<T>(_: T) {
+    println!("{}", std::any::type_name::<T>());
+}
+
+print_type(1);
+print_type(1.0);
+print_type(true);
+print_type("a");
+```
+
+Rust has no `typeof()`, because by the time the program runs the question has already been answered. The `print_type()` helper asks the compiler to write each type's name into the program and prints it. The answers are `i32` (a 32-bit signed integer), `f64` (a 64-bit floating-point number), `bool`, and `&str` (a borrowed string, see @sec-strings).
+
+::: {.callout-note title="Syntax ahead: the print_type() helper"}
+Defining `print_type()` takes syntax that later chapters cover. You can treat the helper as a black box for now. Here's what each piece means and where it's explained:
+
+| Syntax | What it means here | Covered in |
+|--------------|------------------------------------------|--------------|
+| `<T>` | A type parameter: `print_type()` accepts a value of any type, called `T` inside the function | @sec-generics |
+| `_` | A pattern that ignores the argument; only its type matters | @sec-enums |
+| `std::any::` | A path: `type_name()` lives in the standard library's `any` module, the way `head()` lives in R's `utils` package | @sec-crates |
+| `::<T>` | Passes the type parameter explicitly, a form known as the "turbofish" | @sec-generics |
+:::
+
+Most of the time you don't write types at all. The compiler infers them, and you can add an annotation or a literal suffix when you want something other than the default:
+
+```{rust}
+#| label: rust-annotations
+let a = 1; // i32, the default for integer literals
+let b: i64 = 1; // annotated
+let c = 1_u8; // suffix: an 8-bit unsigned integer
+let d = 2.5; // f64, the default for float literals
+println!("{a} {b} {c} {d}");
+```
+
+Inference looks at how a variable is used, not only at the line that creates it. In this Rust program, `total` starts as a bare `0`, but adding an `i64` to it later settles its type as `i64`. The `print_type()` helper from before is compiled but not shown:
+
+```{rust}
+#| label: rust-inference
+# fn print_type<T>(_: T) {
+#     println!("{}", std::any::type_name::<T>());
+# }
+let mut total = 0;
+let big: i64 = 5_000_000_000;
+total += big;
+print_type(total);
+```
+
+The underscores in `5_000_000_000` are only for readability; Rust ignores them in numeric literals.
+
+::: {.callout-note title="R refresher: typeof(), mode(), and class()" collapse="true"}
+R has three functions that answer "what is this?" and they answer differently:
+
+```{r}
+#| label: r-refresher-type
+x <- matrix(1:4, nrow = 2)
+typeof(x)
+mode(x)
+class(x)
+```
+
+`typeof()` reports how the underlying vector is stored. `mode()` is the older S-compatible view that groups integers and doubles together as `"numeric"` [@r-intro, sec. 3.1]. `class()` is what S3 dispatch uses: the `class` attribute when one is set, which can be any string, and otherwise an implicit class based on the type and dimensions, as with this matrix. Rust's types correspond to storage types, so `typeof()` is the useful comparison in this chapter. `class()` comes back with traits in @sec-s3-traits.
+:::
+
+## `1L` versus `1`
+
+The two languages have opposite defaults. In R, `1` is a double and you need the `L` suffix to get an integer. In Rust, `1` is an integer; for a float, write `1.0` or add a suffix, as in `1_f64`.
+
+Most of R's basic vector types have a close match among Rust's scalar types:
+
+| R (`typeof()`) | Closest Rust type | Notes |
+|------------|------------|------------------------|
+| `logical` | `bool` | R's logical also has `NA` |
+| `integer` | `i32` | R reserves one value for `NA` |
+| `double` | `f64` | Same IEEE 754 format |
+| `complex` | none | Not in the standard library; the `num-complex` crate provides one |
+| `character` | `String`, `&str` | See @sec-strings |
+| `raw` | `u8` | |
+
+Rust also has integer types with no R counterpart: signed `i8`, `i16`, `i64`, and `i128`, unsigned `u8` through `u128`, and the pointer-sized `isize` and `usize`. In practice you'll use `i32` or `i64` for integers that can be negative, `usize` for lengths and indexes (@sec-vectors), and `f64` for measurements. There's also a 32-bit `f32`, which matters mostly when memory is tight.
+
+::: {.callout-tip title="The same idea in R"}
+R's integers are 32-bit signed integers and its doubles are 64-bit IEEE 754 floats, the same formats as Rust's `i32` and `f64`. `.Machine` gives the same limits Rust exposes as constants:
+
+```{r}
+#| label: r-machine
+.Machine$integer.max
+.Machine$double.eps
+```
+
+```{rust}
+#| label: rust-limits
+println!("{}", i32::MAX);
+println!("{:e}", f64::EPSILON);
+```
+
+The `{:e}` in the Rust code prints a number in scientific notation; @sec-display covers this and the other format specifications.
+:::
+
+::: {.callout-warning title="Where the analogy breaks"}
+R's integer range is one value short. The smallest `i32` is -2147483648, but R uses that bit pattern to store `NA_integer_`, so subtracting one from R's smallest integer gives `NA`. The raw bytes show it (on a little-endian machine, which is nearly every machine you'll use):
+
+```{r}
+#| label: r-na-integer
+-.Machine$integer.max - 1L
+writeBin(NA_integer_, raw())
+```
+
+```{rust}
+#| label: rust-i32-min
+println!("{}", i32::MIN);
+println!("{:02x?}", i32::MIN.to_le_bytes());
+```
+
+In Rust, `to_le_bytes()` gives an integer's bytes in little-endian order, and `{:02x?}` prints each byte as two hexadecimal digits, the way R prints raw bytes.
+
+An `i32` has no spare value for "missing". When a number might be absent, Rust uses a different type, `Option<i32>`, covered in @sec-missingness.
+:::
+
+## No implicit coercion
+
+When arithmetic mixes logicals, integers, and doubles, R converts the operands to a common numeric type. An integer plus a double is a double, and `TRUE` counts as 1:
+
+```{r}
+#| label: r-coercion
+n <- 1L
+n + 1.5
+TRUE + TRUE
+```
+
+Rust doesn't convert for you. Passing an `i32` to a function that expects an `f64` is a compile error:
+
+```{rust}
+#| label: rust-mismatch
+#| error: true
+fn half(x: f64) -> f64 {
+    x / 2.0
+}
+
+fn main() {
+    let n: i32 = 3;
+    println!("{}", half(n));
+}
+```
+
+The error says what it expected, what it found, and how to fix it. Writing `n + 1.5` fails the same way, with a longer message about `i32` not supporting addition with a float. To mix types, you convert explicitly:
+
+```{rust}
+#| label: rust-convert
+let n: i32 = 1;
+let x = f64::from(n) + 1.5;
+let y = n as f64 + 1.5;
+let hits = i32::from(true) + i32::from(true);
+println!("{x} {y} {hits}");
+```
+
+`f64::from()`, like the `.into()` the compiler suggested, only exists for conversions that can't lose information. Every `i32` fits exactly in an `f64`, so `f64::from(n)` compiles; not every `i64` does, so `f64::from(5_i64)` doesn't. An `as` cast between numeric types always compiles, even when it loses information; @sec-conversions shows what it does then. I'll use `from()` where it's available and `as` only where it isn't.
+
+::: {.callout-note title="An R habit to drop in Rust"}
+R code leans on coercion constantly. `sum(x > 0)` counts positive values because `TRUE` is 1, and `mean(is.na(x))` gives the proportion missing for the same reason. Rust's `bool` isn't a number, so `true + true` doesn't compile. In Rust you count matches by filtering an iterator and calling `count()`, which @sec-iterators covers. The broader habit to drop is letting the language decide what mixed arithmetic means. In Rust, you write the decision down.
+:::
+
+## Division
+
+The `/` operator means different things in the two languages. Here are division and remainders in R, then their Rust counterparts:
+
+```{r}
+#| label: r-division
+7 / 2
+7L / 2L
+7L %/% 2L
+-7L %/% 2L
+-7L %% 2L
+```
+
+```{rust}
+#| label: rust-division
+println!("{}", 7 / 2);
+println!("{}", 7.0 / 2.0);
+println!("{}", -7 / 2);
+println!("{}", -7 % 2);
+println!("{}", (-7_i32).div_euclid(2));
+println!("{}", (-7_i32).rem_euclid(2));
+```
+
+In R, `/` returns a double even when both operands are integers. In Rust, `/` on two integers is integer division and discards the remainder, so `7 / 2` is `3`. To get `3.5` you need floats on both sides.
+
+::: {.callout-warning title="Where the analogy breaks"}
+Rust's integer `/` is not R's `%/%`. R's `%/%` rounds down (toward negative infinity) and Rust's `/` rounds toward zero. They agree for positive operands. When the exact quotient is negative and not a whole number, they differ by one: `-7L %/% 2L` is -4 in R, while `-7 / 2` is -3 in Rust. The remainders differ to match: R's `%%` takes the sign of the divisor and Rust's `%` takes the sign of the dividend. When the divisor is positive, `div_euclid()` and `rem_euclid()` give the same answers as R's `%/%` and `%%`.
+
+The parentheses in `(-7_i32).div_euclid(2)` matter. Method calls bind more tightly than unary minus, so `-7_i32.div_euclid(2)` means `-(7_i32.div_euclid(2))`, which is -3. R has the same trap with `-2^2`, which is -4.
+:::
+
+## Overflow
+
+Add one to the largest integer and R returns `NA` with a warning:
+
+```{r}
+#| label: r-overflow
+.Machine$integer.max + 1L
+```
+
+Rust stops the program with a *panic*:
+
+```{rust}
+#| label: rust-overflow-panic
+#| error: true
+fn add_one(x: i32) -> i32 {
+    x + 1
+}
+
+fn main() {
+    println!("{}", add_one(i32::MAX));
+}
+```
+
+A panic means the program reached a state its author didn't plan for, and Rust would rather stop than continue with a wrong number. It isn't an error you handle the way you would with `tryCatch()`; that role belongs to `Result`, the subject of @sec-errors.
+
+The `add_one()` function is there to hide the value from the compiler. If the compiler can see the overflow, it rejects the program before it runs:
+
+```{rust}
+#| label: rust-overflow-const
+#| error: true
+let x = i32::MAX + 1;
+println!("{x}");
+```
+
+The panic depends on how the program is built. The examples in this book are compiled in debug mode, the default for `cargo build` and `cargo run`. Debug builds check every integer operation for overflow. A release build (`cargo build --release`) drops most of these checks for speed, so the same addition silently wraps around to `i32::MIN` [@rustbook, sec. 3.2]. Division keeps its checks: dividing by zero, or dividing `i32::MIN` by -1, panics in every build. Code that relies on wrapping or on a panic is a bug. If overflow is possible, say what should happen:
+
+```{rust}
+#| label: rust-overflow-methods
+let big = i32::MAX;
+println!("{:?}", big.checked_add(1));
+println!("{}", big.wrapping_add(1));
+println!("{}", big.saturating_add(1));
+```
+
+`checked_add()` returns `None` when the result doesn't fit, `wrapping_add()` wraps around on purpose, and `saturating_add()` stops at the largest value. The same three variants exist for subtraction and multiplication.
+
+::: {.callout-tip title="The same idea in R"}
+R's integer arithmetic is `checked_add()` with the failure stored as `NA` in the result. Rust's `checked_add()` returns `None` instead, which is Rust's way of writing a missing value that the type system tracks. The connection between `NA` and `None` is the subject of @sec-missingness.
+:::
+
+::: {.callout-note title="Package developer notes: integers in compiled code" collapse="true"}
+In C code for an R package, R's integers arrive as plain C `int`s with no overflow checking, and signed overflow in C is undefined behavior. *Writing R Extensions* notes that missing integers are tested by equality with the constant `NA_INTEGER` [@r-exts, sec. 5.10.3]. It also lists a common bug that the undefined behavior sanitizer catches: indexing with `y[x - 1]` while forgetting that `x` might be `NA_INTEGER` [@r-exts, sec. 4.3.4].
+
+Rust removes the undefined part: overflow either panics or wraps, and both are defined. It doesn't remove the `NA` problem. A Rust function that receives an R integer vector through `.Call()` sees `NA` as `i32::MIN` and has to check for it, just as C code does (@sec-extending-r).
+:::
+
+## Converting between types {#sec-conversions}
+
+In R, `as.integer()` truncates toward zero. A number too large for an integer, or text that isn't a number, becomes `NA` with a warning, while `NaN` becomes `NA` without one:
+
+```{r}
+#| label: r-as-integer
+as.integer(3.9)
+as.integer(-3.9)
+as.integer(3e9)
+as.integer(NaN)
+as.integer("12")
+as.integer("twelve")
+```
+
+Rust separates conversions that can't fail from those that can. The `as` keyword converts between numeric types and always succeeds. Parsing text is a separate operation that can fail, so it returns a `Result`: `Ok` with the value, or `Err` with the reason. The same goes for `try_from()`, which converts between integer types when the value might not fit.
+
+Here are the Rust conversions, plus one `as` cast between two integer types:
+
+```{rust}
+#| label: rust-as
+println!("{}", 3.9_f64 as i32);
+println!("{}", -3.9_f64 as i32);
+println!("{}", 3e9_f64 as i32);
+println!("{}", f64::NAN as i32);
+println!("{}", 300_i32 as u8);
+println!("{:?}", "12".parse::<i32>());
+println!("{:?}", "twelve".parse::<i32>());
+println!("{:?}", i32::try_from(3_000_000_000_i64));
+```
+
+::: {.callout-warning title="Where the analogy breaks"}
+`as` never returns anything like `NA`. Where R gives up, `as` picks a value: a float too large for `i32` becomes `i32::MAX`, and `NaN` becomes 0. Both look like ordinary numbers. Between integer types, `as` doesn't clamp: it keeps the low bits, so `300_i32 as u8` is 44, which is 300 minus 256. That's the case `try_from()` is for. The standard library has no `try_from()` from floats to integers, so when a float might be out of range or `NaN`, check it before converting.
+:::
+
+## Floating point is the same in both
+
+Floating-point surprises aren't an R quirk. Both languages use the same IEEE 754 doubles, so they agree on rounding error, infinity, and `NaN`:
+
+```{r}
+#| label: r-float
+0.1 + 0.2 == 0.3
+isTRUE(all.equal(0.1 + 0.2, 0.3))
+c(1 / 0, -1 / 0, 0 / 0)
+```
+
+```{rust}
+#| label: rust-float
+let x: f64 = 0.1 + 0.2;
+println!("{}", x == 0.3);
+println!("{}", (x - 0.3).abs() < 1.5e-8);
+println!("{}", 1.0 / 0.0);
+println!("{}", -1.0 / 0.0);
+println!("{}", 0.0_f64 / 0.0);
+```
+
+The standard library has no `all.equal()`, so you write the comparison with a tolerance yourself. (`all.equal()` uses a relative tolerance of about `1.5e-8`; the absolute tolerance above is a simplification.) The two do differ in one way: R doubles have both `NaN` and `NA_real_`, while an `f64` only has `NaN`. @sec-missingness picks that up.
+
+## Summary
+
+| R | Rust |
+|---|------|
+| Types are checked as the code runs; `typeof()` reports them | Types are known at compile time, inferred or annotated |
+| `1` is a double, `1L` is an integer | `1` is an `i32`, `1.0` is an `f64` |
+| Mixed types are coerced automatically | Conversions are explicit, with `from()` or `as` |
+| `/` returns a double, even for integers; `%/%` rounds down | `/` on integers rounds toward zero; `div_euclid()` rounds down for positive divisors |
+| Integer overflow gives `NA` and a warning | Overflow panics in debug builds; release builds wrap instead, except in division; `checked_add()` and friends make the choice explicit |
+| `as.integer()` returns `NA` when it fails | `as` never fails, even when it loses information; `parse()` and `try_from()` return a `Result` |
+| Doubles follow IEEE 754; `all.equal()` compares with a tolerance | `f64` is the same format; you write tolerance comparisons yourself |

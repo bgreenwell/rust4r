@@ -1,0 +1,228 @@
+# Formal classes {#sec-s4}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+S4 is R's formal object system. A class declares its slots and their types, a validity function states the rules its objects must follow, and a virtual class defines an interface that other classes extend. All of that is checked at runtime. Rust reaches the same goals with a constructor that can refuse bad input, private fields that keep code elsewhere from breaking the rules later, and traits as interfaces. This chapter builds the running class in S4 and compares each piece with its Rust counterpart. The matching sections of the Rust book are "To `panic!` or Not to `panic!`", whose last part covers custom types for validation, and "Paths for Referring to an Item in the Module Tree", which covers public and private fields [@rustbook, secs. 9.3, 7.3].
+
+## Validity
+
+@sec-structs gave an S4 class typed slots. A validity function adds rules that types alone can't express. A standard deviation must be a single positive number:
+
+```{r}
+#| label: r-validity
+setClass("Normal",
+  slots = c(mean = "numeric", sd = "numeric"),
+  validity = function(object) {
+    if (length(object@mean) != 1) {
+      "mean must be a single number"
+    } else if (length(object@sd) != 1 || object@sd <= 0) {
+      "sd must be a single positive number"
+    } else {
+      TRUE
+    }
+  }
+)
+
+new("Normal", mean = 0, sd = 2)
+```
+
+Given slot values, `new()` calls the validity function and refuses to create an object that breaks the rule. That includes the case from @sec-structs, a forgotten slot, which now fails because its length is zero:
+
+```{r}
+#| label: r-validity-errors
+#| error: true
+new("Normal", mean = 0, sd = -1)
+new("Normal", mean = 0)
+```
+
+One call skips the check. With no slot values at all, `new("Normal")` returns an object whose slots are empty vectors and never runs the validity function.
+
+## Fallible constructors
+
+Rust has no validity functions. The rule goes in the constructor, which returns a `Result` instead of a `Normal`:
+
+```{rust}
+#| label: rust-fallible
+#[derive(Debug)]
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl Normal {
+    fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+        if sd > 0.0 {
+            Ok(Normal { mean, sd })
+        } else {
+            Err(format!("sd must be positive, not {sd}"))
+        }
+    }
+}
+
+fn main() {
+    println!("{:?}", Normal::new(0.0, 2.0));
+    println!("{:?}", Normal::new(0.0, -1.0));
+}
+```
+
+You saw `Result` in @sec-types, where parsing text returned `Ok` with a number or `Err` with the reason it failed. It works like `Option` from @sec-missingness, except that the failure carries a value: here, a message saying what was wrong. The type `Result<Normal, String>` reads "either a `Normal` or a `String` explaining why not".
+
+Writing the test as `sd > 0.0` also rejects `NaN`, because `>` is false whenever one side is `NaN`. The R version, which tests `object@sd <= 0`, stops with an unrelated error when `sd` is `NaN`, since `if (NA)` can't decide.
+
+The caller gets the value out the same ways as with an `Option`:
+
+```{rust}
+#| label: rust-fallible-use
+# #[derive(Debug)]
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Normal {
+#     fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+#         if sd > 0.0 {
+#             Ok(Normal { mean, sd })
+#         } else {
+#             Err(format!("sd must be positive, not {sd}"))
+#         }
+#     }
+# }
+#
+let dist = Normal::new(0.0, 2.0).expect("parameters are valid");
+println!("{:?}", dist);
+
+if let Err(message) = Normal::new(0.0, -1.0) {
+    println!("rejected: {message}");
+}
+```
+
+@sec-errors covers `Result` in depth, including the `?` operator for passing an error up to the caller.
+
+## Keeping objects valid
+
+S4 checks validity when an object is created from slot values. Assigning to a slot afterward checks only the type, so a valid object can become invalid without complaint:
+
+```{r}
+#| label: r-validity-bypass
+#| error: true
+dist <- new("Normal", mean = 0, sd = 2)
+dist@sd <- -1
+dist@sd
+validObject(dist)
+```
+
+The broken object lives on until something calls `validObject()`, which R doesn't do on its own after an assignment.
+
+Rust closes that gap with privacy. Fields are private to the module that defines the struct unless marked `pub`. Put the struct in a module, make the struct and its methods public but not its fields, and code outside the module can create a `Normal` only through `new()` and can't change its fields at all:
+
+```{rust}
+#| label: rust-private-fields
+#| error: true
+mod distributions {
+    pub struct Normal {
+        mean: f64,
+        sd: f64,
+    }
+
+    impl Normal {
+        pub fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+            if sd > 0.0 {
+                Ok(Normal { mean, sd })
+            } else {
+                Err(format!("sd must be positive, not {sd}"))
+            }
+        }
+
+        pub fn sd(&self) -> f64 {
+            self.sd
+        }
+    }
+}
+
+fn main() {
+    let mut dist =
+        distributions::Normal::new(0.0, 2.0).expect("parameters are valid");
+    println!("{}", dist.sd());
+    dist.sd = -1.0;
+}
+```
+
+Reading the standard deviation goes through the public method `sd()`. Writing to the field is a compile error, and so is building a `Normal` with `distributions::Normal { mean: 0.0, sd: -1.0 }` outside the module. That leaves `new()` as the only way for outside code to get a `Normal`. As long as the module's own code keeps the rule, every `Normal` has a positive standard deviation, and no code that receives one needs to check.
+
+::: {.callout-note title="Syntax ahead: modules and pub"}
+In Rust, `mod distributions { ... }` creates a module, a named section of code with its own privacy boundary, and `distributions::Normal` refers to the struct inside it. The keyword `pub` makes an item visible outside its module. @sec-crates covers modules properly, including how they map onto files.
+:::
+
+::: {.callout-note title="An R habit to drop in Rust"}
+Defensive R code checks its arguments at the top of every function, because any object might have been modified since it was created. With private fields and a validating constructor, Rust code checks once, at construction. A function that takes a `Normal` can rely on its standard deviation being positive. Alexis King's name for the pattern is "parse, don't validate" [@king2019]: convert unchecked input into a type that can only hold valid values, once, at the edge of the program.
+:::
+
+## Virtual classes and traits
+
+An S4 virtual class can't have objects of its own. It names an interface that other classes extend, and generics can define methods for it. Here's a `Distribution` virtual class with a `variance()` generic:
+
+```{r}
+#| label: r-virtual
+setClass("Distribution", representation("VIRTUAL"))
+setGeneric("variance", function(dist) standardGeneric("variance"))
+
+setClass("Normal", contains = "Distribution",
+         slots = c(mean = "numeric", sd = "numeric"))
+setMethod("variance", "Normal", function(dist) dist@sd^2)
+
+setClass("Uniform", contains = "Distribution",
+         slots = c(min = "numeric", max = "numeric"))
+
+is(new("Normal", mean = 0, sd = 2), "Distribution")
+variance(new("Normal", mean = 0, sd = 2))
+```
+
+The call to `setGeneric()` creates the `variance()` generic and prints its name. The generic's body, `standardGeneric("variance")`, dispatches to the method for its argument's class, and `setMethod()` adds the method for `Normal`, as it added a `show()` method in @sec-display.
+
+(The validity function is left out here to keep the example short.) R refuses to create a `Distribution` directly, and it lets `Uniform` extend `Distribution` without a `variance()` method. The gap shows only when the method is called:
+
+```{r}
+#| label: r-virtual-errors
+#| error: true
+new("Distribution")
+variance(new("Uniform", min = 0, max = 6))
+```
+
+The Rust counterpart of a virtual class is the trait from @sec-s3-traits. A trait isn't a type you can create a value of, just as a virtual class has no objects. Implementing it is how a type declares that it belongs, the way `contains = "Distribution"` does, and `impl Distribution` in a function's arguments plays the role of `is(x, "Distribution")`. The difference is the one that runs through Part II: Rust requires each implementation to supply every method the trait leaves without a body, and it checks every call before the program runs, as @sec-s3-traits showed.
+
+| S4 | Rust |
+|---------------------------|---------------------------|
+| `setClass("Distribution", representation("VIRTUAL"))` | `trait Distribution { ... }` |
+| `setClass("Normal", contains = "Distribution", ...)` | `impl Distribution for Normal { ... }` |
+| `setGeneric()` and `setMethod()` | Methods declared in the trait and defined in the `impl` |
+| `is(x, "Distribution")`, checked at runtime | `impl Distribution` as an argument type, checked at compile time |
+| A missing method fails when called | A missing required method fails to compile |
+
+S4 also has class unions. In R, `setClassUnion("NumericOrNormal", c("numeric", "Normal"))` creates a virtual class that either of two existing classes satisfies. The closest Rust construct is an enum, the subject of @sec-enums, with one difference: a class union can gain members later, while an enum's variants are fixed where the enum is defined.
+
+::: {.callout-warning title="Where the analogy breaks"}
+S4 virtual classes take part in inheritance: a class can extend a virtual class and also inherit slots and methods from a concrete one, and methods for the parent apply to the child. Rust traits carry no fields and set up no inheritance between types. A trait can require its implementors to implement another trait as well, but a struct never inherits another struct's fields or methods.
+:::
+
+::: {.callout-note title="Package developer notes: exporting classes" collapse="true"}
+A package that defines S4 classes for others to use lists them in `exportClasses()` in its `NAMESPACE`, and the methods it defines for generics from other packages in `exportMethods()` [@r-exts, sec. 1.5.6]. Rust marks structs, fields, and a type's own methods with `pub`, one item at a time. Trait implementations need no export: a trait's methods share the trait's visibility, and `pub` on one of them is a compile error. A public struct with private fields is the equivalent of exporting a class while keeping its slots out of reach, something S4 can't do, since `@` reaches any slot of any object.
+:::
+
+## Summary
+
+| R (S4) | Rust |
+|---------------------------|---------------------------|
+| A validity function | Checks in a constructor that returns a `Result` |
+| `new()` stops with an error | `new()` returns `Err(message)` |
+| `obj@sd <- -1` skips validity | Private fields can't be assigned outside their module |
+| `validObject()` re-checks on request | Outside the module, every value came through `new()`; no re-check needed |
+| A virtual class | A trait |
+| `contains = "Distribution"` | `impl Distribution for Normal` |
+| `is(x, "Distribution")` at runtime | `impl Distribution` arguments at compile time |
+| `setClassUnion()`, which can gain members later | An enum, whose variants are fixed |
+| `exportClasses()`, `exportMethods()` | `pub` on structs, fields, and a type's own methods; trait methods follow the trait |

@@ -1,0 +1,77 @@
+# Setting up the toolchain {#sec-toolchain}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+@sec-setup installs Rust and builds a first project. This appendix lists everything else the book's examples use, shows how a Quarto document can run Rust code next to R code, as this book does, and describes how to build the book itself.
+
+## Tools the examples use
+
+| Tool | Used in | How to get it |
+|--------------------|------------------------|------------------------------|
+| R | Every R example | <https://cran.r-project.org> |
+| `rustc` and `cargo` | Every Rust example | `rustup` (@sec-setup) |
+| Clippy | @sec-crates | Installed by `rustup` |
+| S7 | @sec-s7 and @sec-running-class | `install.packages("S7")` |
+| rextendr, usethis, and devtools | @sec-extending-r | `install.packages(c("rextendr", "usethis", "devtools"))` |
+| `csv`, `serde`, `clap`, `rayon`, `rand`, and `extendr-api` | Part V and @sec-extending-r | Downloaded by Cargo on first use |
+
+The default `rustup` profile installs Clippy and `rustfmt` along with the compiler [@rustup]. The crates need nothing from you: Cargo downloads the versions a project's `Cargo.toml` asks for when the project is first built, which takes a network connection. On Windows, @sec-extending-r also needs Rtools (<https://cran.r-project.org/bin/windows/Rtools/>) and Rust's GNU target, `rustup target add x86_64-pc-windows-gnu`, because R builds packages there with the GNU tools rather than the Visual Studio ones from @sec-setup. Running `rextendr::rust_sitrep()` reports anything that's missing. The preface lists the versions of everything used for this edition.
+
+## Rust in a Quarto document
+
+Quarto runs the code in a document with knitr when the document contains R code chunks [@quarto; @knitr]. knitr hands each chunk to an *engine*, an R function that receives the chunk's code and options and returns what to display. knitr comes with engines for many languages, but Rust isn't one of them. An engine takes only a few lines, though, and this one compiles a chunk with `rustc` and runs the result:
+
+```{r}
+#| label: r-engine-demo
+knitr::knit_engines$set(rust_demo = function(options) {
+  dir <- tempfile()
+  dir.create(dir)
+  src <- file.path(dir, "main.rs")
+  exe <- file.path(dir, "main")
+  writeLines(options$code, src)
+  out <- system2("rustc", c("--edition=2024", "-o", exe, src),
+                 stdout = TRUE, stderr = TRUE)
+  if (is.null(attr(out, "status"))) {
+    out <- system2(exe, stdout = TRUE, stderr = TRUE)
+  }
+  options$engine <- "rust"
+  knitr::engine_output(options, options$code, out)
+})
+```
+
+With `stdout = TRUE` and `stderr = TRUE`, `system2()` captures both of a command's output streams, including the compiler's error messages. When `rustc` fails, the captured lines carry a `status` attribute, and the engine shows the compiler's messages instead of running anything. Setting `options$engine` to `"rust"` makes the displayed code highlighted as Rust. A chunk that starts with `{rust_demo}` instead of `{r}` now runs as Rust:
+
+```{rust_demo}
+#| label: rust-engine-demo
+#| filename: Rust
+fn main() {
+    let v = vec![1.0, 2.0, 3.0];
+    println!("{}", v.iter().sum::<f64>());
+}
+```
+
+The registration goes in an R chunk at the top of the document, which also makes Quarto choose knitr.
+
+The engine that runs this book's examples is a longer version of the same function, defined in the book's `_common.R`. It adds what the chapters rely on:
+
+- A chunk without `fn main()` is wrapped in one.
+- Lines that start with a `#` followed by a space are compiled but not displayed, so an example can repeat setup code from an earlier one without showing it. The convention comes from rustdoc and from mdBook, which builds the Rust book.
+- A compile error or a panic stops the render, unless the chunk sets `error: true`, in which case the message is the output.
+- Chunks that use crates are built with Cargo, in a project whose `Cargo.toml` and `Cargo.lock` fix the crates' versions (@sec-crates).
+- It names the program with `.exe` on Windows.
+
+rextendr offers another route [@rextendr]. Loading it adds two engines: `extendrsrc`, which compiles a chunk of `#[extendr]` functions and makes them available to later R chunks, and `extendr`, which evaluates a Rust expression and returns its value to R. Both build with extendr, as @sec-extending-r does, so they suit code that R calls, not standalone programs.
+
+## Building this book
+
+The book is a Quarto project, and its source is at <https://github.com/bgreenwell/rust4r>. To build it from its source, install Quarto, R with the packages in the table above plus knitr and rmarkdown, and Rust. The PDF also needs a LaTeX distribution; `quarto install tinytex` installs a small one. Then, in the book's folder:
+
+```{.bash filename="Terminal"}
+quarto render
+```
+
+Quarto saves each chapter's results in `_freeze/` and runs a chapter's code again only when its source changes. Delete `_freeze/` to run every example again, for example after updating R or Rust. (The libraries @sec-extending-r builds by hand need macOS, or Linux with an R built as a shared library.) A build that starts from an empty `_freeze/` and finishes is a test that every example in the book still works.

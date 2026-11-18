@@ -1,0 +1,262 @@
+# Printing objects {#sec-display}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R prints every object somehow. Type a variable's name at the console and you get output, whether or not anyone wrote a print method for its class. Rust prints only what it's been told how to print, through formatting traits from the standard library. The two main ones are `Debug`, the form for programmers, written `{:?}`, and `Display`, the form for users, written `{}`. This chapter maps R's `print()`, `format()`, `str()`, `show()`, and `summary()` onto those two traits, and covers how to control the formatting of numbers, where the two languages have different defaults. The matching material is "An Example Program Using Structs" in the Rust book and the documentation of the standard library's `std::fmt` module [@rustbook, sec. 5.2; @rust-std].
+
+## Two ways to print
+
+Without a print method, R falls back on printing the object's structure, and `str()` shows it more compactly:
+
+```{r}
+#| label: r-default-print
+normal <- function(mean = 0, sd = 1) {
+  structure(list(mean = mean, sd = sd), class = "normal")
+}
+
+dist <- normal(0, 2)
+dist
+str(dist)
+```
+
+Rust's equivalent of that fallback is the `Debug` trait. You get it with `#[derive(Debug)]`, as in @sec-structs, and print with `{:?}`, or with `{:#?}` to spread the fields over several lines:
+
+```{rust}
+#| label: rust-debug
+#[derive(Debug)]
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+fn main() {
+    let dist = Normal { mean: 0.0, sd: 2.0 };
+    println!("{:?}", dist);
+    println!("{:#?}", dist);
+}
+```
+
+Derived `Debug` output shows the type and every field, so it's for whoever is writing or fixing the code. The `{}` form, `Display`, is for the people using the program, and it has no automatic version: the compiler can't guess how a normal distribution should look to a reader, so you write it.
+
+The same split shows up in how the two languages print strings. R's `print()` shows a string as code, with quotes and escapes, and `cat()` shows the text itself. Rust's `{:?}` and `{}` do the same:
+
+```{r}
+#| label: r-print-cat
+s <- 'say "hi"'
+print(s)
+cat(s, "\n")
+```
+
+```{rust}
+#| label: rust-debug-display
+let s = "say \"hi\"";
+println!("{:?}", s);
+println!("{}", s);
+```
+
+## A print method
+
+The usual way to give an S3 class a readable form is a `format()` method that builds the text and a `print()` method that writes it. A print method returns its argument invisibly, so that `print(x)` can sit in the middle of a pipeline:
+
+```{r}
+#| label: r-print-method
+format.normal <- function(x, ...) {
+  paste0("Normal(mean = ", x$mean, ", sd = ", x$sd, ")")
+}
+
+print.normal <- function(x, ...) {
+  cat(format(x), "\n")
+  invisible(x)
+}
+
+dist
+format(dist)
+```
+
+In Rust, you implement `Display` for the type. The trait has one method, `fmt()`, which writes the text:
+
+```{rust}
+#| label: rust-display
+use std::fmt;
+
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl fmt::Display for Normal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Normal(mean = {}, sd = {})", self.mean, self.sd)
+    }
+}
+
+fn main() {
+    let dist = Normal { mean: 0.0, sd: 2.0 };
+    println!("{dist}");
+    let text = dist.to_string();
+    println!("{:?}", text);
+}
+```
+
+The `write!` macro works like `format!` from @sec-strings, except that it writes into `f` instead of returning a `String`. Once `Display` is implemented, `{}` and `{dist}` print a `Normal`, and `to_string()` returns the same text as a `String`, the way `format()` does in R. The last line prints that `String` with `{:?}`, so it appears in quotes, as R's `format(dist)` does.
+
+::: {.callout-note title="Syntax ahead: the fmt() signature"}
+The signature of `fmt()` is fixed by the `Display` trait, so you can copy it as it is. Here's what its pieces mean and where they're explained:
+
+| Syntax | What it means here | Covered in |
+|--------------|------------------------------------------|--------------|
+| `use std::fmt;` | Lets the code write `fmt::Display` instead of `std::fmt::Display` | @sec-crates |
+| `&mut fmt::Formatter` | A reference through which `fmt()` can change the formatter, by writing text into it | @sec-borrowing |
+| `fmt::Result` | The result of writing, which reports whether it worked | @sec-errors |
+:::
+
+::: {.callout-tip title="The same idea in R"}
+R's convention of a `format()` method that builds text and a `print()` method that outputs it is the same division of labor Rust uses. In Rust, `Display` builds the text, and `println!`, `format!`, and `to_string()` decide where it goes.
+:::
+
+## Formatting numbers
+
+@sec-s3-traits noted that R and Rust print numbers differently. R rounds to about seven significant digits by default, while Rust's `{}` prints every digit needed to identify the value:
+
+```{r}
+#| label: r-number-formats
+x <- pi * 1000
+x
+print(x, digits = 3)
+sprintf("%.2f", x)
+sprintf("%10.2f", x)
+sprintf("%e", x)
+```
+
+```{rust}
+#| label: rust-number-formats
+let x = std::f64::consts::PI * 1000.0;
+println!("{}", x);
+println!("{:.2}", x);
+println!("{:10.2}", x);
+println!("{:e}", x);
+```
+
+Inside the braces, a format specification follows the colon. In `{:.2}`, the `.2` sets two decimal places, and `{:10.2}` also pads the result to a width of 10, like `"%10.2f"` in `sprintf()`. Scientific notation follows the `{}` rule: `{:e}` keeps every digit and writes the exponent as `e3`, where R writes `e+03`.
+
+Width works for numbers and strings: `{:>8}` right-aligns a value in at least eight characters, and `{:<8}` left-aligns it. A `Display` implementation like the one for `Normal` ignores width unless its `fmt()` handles it, so to pad a `Normal`, format `dist.to_string()` instead. The standard library documents the full set of options [@rust-std].
+
+::: {.callout-warning title="Where the analogy breaks"}
+For floating-point numbers, Rust's precision counts decimal places. For example, `{:.3}` turns `3141.592653589793` into `3141.593`. R's `digits` counts significant digits, but only as a minimum: `print(x, digits = 3)` gives `3142`, four significant digits, because R doesn't round away digits before the decimal point. Rust has no format for significant digits outside scientific notation, where `{:.2e}` keeps three and gives `3.14e3`. Nor does Rust have a global setting like `options(digits = ...)` that changes how every number prints. Each `{}` decides for itself.
+:::
+
+## `show()` for S4 objects
+
+S4 classes print through `show()` instead of `print()`. A `show()` method is the S4 counterpart of a `Display` implementation:
+
+```{r}
+#| label: r-show
+setClass("Normal", slots = c(mean = "numeric", sd = "numeric"))
+
+setMethod("show", "Normal", function(object) {
+  cat("Normal(mean = ", object@mean, ", sd = ", object@sd, ")\n", sep = "")
+})
+
+new("Normal", mean = 0, sd = 2)
+```
+
+The class is the one from @sec-structs, and `setMethod()` adds a `show()` method for it. @sec-s4 defines new S4 generics as well.
+
+## Summaries
+
+R's `summary()` usually returns a new object, with its own class and print method, rather than printing directly. That keeps the computation separate from the presentation:
+
+```{r}
+#| label: r-summary
+summary.normal <- function(object, ...) {
+  structure(
+    list(
+      mean = object$mean,
+      sd = object$sd,
+      lower = object$mean - 1.96 * object$sd,
+      upper = object$mean + 1.96 * object$sd
+    ),
+    class = "summary.normal"
+  )
+}
+
+print.summary.normal <- function(x, ...) {
+  cat("Normal distribution\n")
+  cat("  mean:", x$mean, " sd:", x$sd, "\n")
+  cat("  95% of values between", x$lower, "and", x$upper, "\n")
+  invisible(x)
+}
+
+summary(dist)
+```
+
+Rust has no standard `summary()` trait, but the same design carries over: a method returns a summary struct, and the struct implements `Display`:
+
+```{rust}
+#| label: rust-summary
+use std::fmt;
+
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+struct NormalSummary {
+    mean: f64,
+    sd: f64,
+    lower: f64,
+    upper: f64,
+}
+
+impl Normal {
+    fn summary(&self) -> NormalSummary {
+        NormalSummary {
+            mean: self.mean,
+            sd: self.sd,
+            lower: self.mean - 1.96 * self.sd,
+            upper: self.mean + 1.96 * self.sd,
+        }
+    }
+}
+
+impl fmt::Display for NormalSummary {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // A \ at the end of a line continues the string on the next line,
+        // without the next line's leading spaces
+        write!(
+            f,
+            "Normal distribution\n  mean: {}  sd: {}\n  \
+             95% of values between {} and {}",
+            self.mean, self.sd, self.lower, self.upper
+        )
+    }
+}
+
+fn main() {
+    let dist = Normal { mean: 0.0, sd: 2.0 };
+    println!("{}", dist.summary());
+}
+```
+
+The summary struct's fields can be used directly, by code that needs the interval rather than the text, just as an R summary object's elements can.
+
+::: {.callout-note title="Package developer notes: method signatures" collapse="true"}
+*Writing R Extensions* asks that a method have all the arguments of its generic, including `...` if the generic has it [@r-exts, chap. 7]. The S3 generic/method consistency check in `R CMD check` tests that. Nothing checks what a method returns, though, so returning the argument invisibly from `print()` is a convention you keep yourself. Rust's `Display` trait fixes the whole signature of `fmt()`, return type included, and the compiler rejects an implementation that doesn't match it.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| Every object prints, method or not | A type prints only through a formatting trait, such as `Debug` or `Display` |
+| `str(x)`, or printing without a method | `#[derive(Debug)]` and `{:?}` or `{:#?}` |
+| `print()` shows a string with quotes; `cat()` without | `{:?}` shows a string with quotes; `{}` without |
+| A `format()` method plus a `print()` method | `impl fmt::Display`, then `{}` or `to_string()` |
+| S4 `show()` | `impl fmt::Display` |
+| `sprintf("%.2f", x)`, `sprintf("%10.2f", x)` | `{:.2}`, `{:10.2}` |
+| `options(digits = 7)` sets a minimum number of significant digits | For floats, `{:.3}` counts decimal places; no global setting |
+| `summary()` returns an object with a print method | A method returns a struct that implements `Display` |

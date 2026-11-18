@@ -1,0 +1,280 @@
+# Vectors {#sec-vectors}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R has no scalars. The number `5` is a numeric vector of length one, and anything you can do to a million numbers you can do to it. Rust separates the two: `5` is a single integer, and a sequence of integers is a `Vec`. This chapter covers that split, how Rust's vectors compare with R's atomic vectors, and slices, Rust's way of referring to part of a vector. The matching sections of the Rust book are "Storing Lists of Values with Vectors" and "The Slice Type" [@rustbook, secs. 8.1, 4.3].
+
+## A single value is not a vector
+
+In R, a single number already behaves like a vector:
+
+```{r}
+#| label: r-scalar
+length(5)
+5[1]
+is.vector(5)
+```
+
+In Rust, a single number can't be indexed, because it isn't a collection of anything:
+
+```{rust}
+#| label: rust-scalar
+#| error: true
+let x = 5;
+println!("{}", x[0]);
+```
+
+`x[0]` asks for the first element; Rust counts positions from zero, as you'll see below. The `{integer}` in the error is the compiler's name for an integer whose exact size it hasn't settled yet (@sec-types).
+
+## Creating vectors
+
+In Rust, the `vec!` macro plays the role of R's `c()`. Here's each one building the same three-element vector:
+
+```{r}
+#| label: r-create
+x <- c(10, 20, 30)
+x
+length(x)
+```
+
+```{rust}
+#| label: rust-create
+let v = vec![10, 20, 30];
+println!("{:?}", v);
+println!("{}", v.len());
+```
+
+The name `vec!` ends in `!` because it's a macro, like `println!`. The `{:?}` in the first `println!` prints a value in its debugging form. Plain `{}` works for numbers and text, but a vector has no single obvious way to be displayed, so Rust makes you ask for the debugging form explicitly (@sec-display explains the difference).
+
+The type of `v` is `Vec<i32>`, read "a vector of `i32` values". The type inside the angle brackets is the element type. Rust picked `i32`, its default integer type, because nothing in the code asks for another (@sec-types).
+
+R's functions for making vectors of a fixed length have a Rust counterpart, too: `vec![value; n]` repeats a value `n` times. Here are R's `numeric()` and `rep()`, then the Rust versions:
+
+```{r}
+#| label: r-repeat
+numeric(3)
+rep(7L, 3)
+```
+
+```{rust}
+#| label: rust-repeat
+println!("{:?}", vec![0.0; 3]);
+println!("{:?}", vec![7; 3]);
+```
+
+## One type per vector
+
+An R atomic vector holds one type, and `c()` quietly converts its arguments to make that true:
+
+```{r}
+#| label: r-mixed
+c(1, "a", TRUE)
+```
+
+A Rust vector holds one type as well, but Rust doesn't convert numbers to text for you, so this mix is a compile error:
+
+```{rust}
+#| label: rust-mixed
+#| error: true
+let v = vec![1, "a"];
+println!("{:?}", v);
+```
+
+::: {.callout-warning title="Where the analogy breaks"}
+R also has lists, which hold values of different types side by side. A Rust `Vec` can't do that. Values of different types that belong together go in a struct (@sec-structs). A value that can take one of several forms is an enum (@sec-enums), and a `Vec` can hold those.
+:::
+
+## Indexing starts at zero
+
+R counts positions from 1. Rust counts from 0, so the first element is `v[0]`:
+
+```{r}
+#| label: r-index
+x <- c(10, 20, 30)
+x[1]
+x[3]
+```
+
+```{rust}
+#| label: rust-index
+let v = vec![10, 20, 30];
+println!("{}", v[0]);
+println!("{}", v[2]);
+```
+
+The two languages disagree about positions past the end. R returns `NA`:
+
+```{r}
+#| label: r-out-of-bounds
+x[4]
+```
+
+Rust stops the program with a *panic*, its way of halting on a bug. This check stays on even in release builds, unlike the integer overflow check that @sec-types describes:
+
+```{rust}
+#| label: rust-out-of-bounds
+#| error: true
+let v = vec![10, 20, 30];
+println!("{}", v[3]);
+```
+
+When a position might be out of range, use `get()` instead. It returns `Some(value)` when the position exists and `None` when it doesn't:
+
+```{rust}
+#| label: rust-get
+let v = vec![10, 20, 30];
+println!("{:?}", v.get(2));
+println!("{:?}", v.get(3));
+```
+
+Strictly, `get()` returns an `Option` holding a reference to the element, so its result can't go straight into arithmetic. @sec-missingness covers `Option`, and @sec-borrowing covers references.
+
+::: {.callout-tip title="The same idea in R"}
+R's `x[4]` returning `NA` is the same idea as `get()` returning `None`: the answer to "what's at this position?" may be "nothing". The difference is that Rust only gives you that answer when you ask for it with `get()`. @sec-missingness compares `NA` and `None` in detail.
+:::
+
+Positions and lengths in Rust have their own type, `usize`, an integer that can't be negative. `v.len()` returns a `usize`, and an index has to be one. A variable declared as `i32` can't index a vector, even when its value is a valid position. @sec-types covers the integer types.
+
+R also accepts negative indexes, which drop elements [@r-intro, sec. 2.7]: `x[-1]` is everything but the first. Rust has no negative indexes. To drop the first element, take a slice.
+
+## Slices
+
+In Rust, a slice refers to a run of consecutive elements, written with a range inside the brackets and an `&` in front. Here are two R subsets, then the matching Rust slices:
+
+```{r}
+#| label: r-slice
+x <- c(10, 20, 30, 40)
+x[2:3]
+x[-1]
+```
+
+```{rust}
+#| label: rust-slice
+let v = vec![10, 20, 30, 40];
+println!("{:?}", &v[1..3]);
+println!("{:?}", &v[1..]);
+```
+
+`1..3` is the range from @sec-setup that stops before its end, so `&v[1..3]` covers positions 1 and 2. Combined with zero-based positions, that makes R's `x[2:3]` and Rust's `&v[1..3]` the same two elements. A range written `1..` runs to the end of the vector. A range that reaches past the end panics, as an index does. So `&v[1..]` needs at least one element, while R's `x[-1]` also works on an empty vector.
+
+The `&` matters. R's `x[2:3]` builds a new vector. A Rust slice copies nothing: it points into `v` and records where the run starts and how long it is. The `&` marks it as a reference, a value that refers to data owned by something else. References are the subject of @sec-borrowing.
+
+Slices are what make one function work on a whole vector or on part of it. In R, `sum()` takes any vector, including a subset:
+
+```{r}
+#| label: r-sum-slice
+x <- c(10, 20, 30, 40)
+sum(x)
+sum(x[2:3])
+```
+
+A Rust function that takes a slice, written `&[i32]`, works the same way:
+
+```{rust}
+#| label: rust-sum-slice
+fn total(values: &[i32]) -> i32 {
+    let mut sum = 0;
+    for value in values {
+        sum += value;
+    }
+    sum
+}
+
+fn main() {
+    let v = vec![10, 20, 30, 40];
+    println!("{}", total(&v));
+    println!("{}", total(&v[1..3]));
+}
+```
+
+`total(&v)` passes the whole vector as a slice and `total(&v[1..3])` passes part of it, and `total()` accepts both. Looping over a slice gives each element as a reference, an `&i32`, and `+=` accepts one, so the loop needs nothing extra. A slice can also be written directly from values, as in `total(&[10, 20, 30])`, without building a `Vec` first; later chapters do this for short inputs.
+
+::: {.callout-warning title="Where the analogy breaks"}
+A slice is always one unbroken run. R's index vectors can pick any elements in any order, as in `x[c(1, 3)]` or `x[x > 15]`. Rust does that kind of selection with iterators (@sec-iterators).
+:::
+
+## No vectorized arithmetic
+
+R's arithmetic works element by element on whole vectors. Rust's `Vec` has no arithmetic operators at all, so `v * 2` doesn't compile. Instead, you loop over the elements and build the result:
+
+```{r}
+#| label: r-double
+x <- c(10, 20, 30)
+x * 2
+```
+
+```{rust}
+#| label: rust-double
+let v = vec![10, 20, 30];
+let mut doubled = Vec::new(); // a Vec<i32>, inferred from the push() below
+for value in v {
+    doubled.push(value * 2);
+}
+println!("{:?}", doubled);
+```
+
+`Vec::new()` creates an empty vector and `push()` adds an element to the end. `doubled` needs `mut` because `push()` changes it. The loop is longer than `x * 2`; @sec-iterators shows a shorter way to write it with `map()`.
+
+The loop also uses up `v`. After `for value in v`, the variable `v` can't be used at all, while R's `x` is still there after `x * 2`. @sec-ownership explains why. Looping over `&v`, a reference to `v`, leaves `v` usable.
+
+::: {.callout-note title="An R habit to drop in Rust"}
+When R combines two vectors of different lengths, it recycles the shorter one [@r-intro, sec. 2.2]. It warns only when the longer length isn't a multiple of the shorter one:
+
+```{r}
+#| label: r-recycle
+c(1, 2, 3, 4) + c(10, 20)
+1:3 + 1:2
+```
+
+Rust has no recycling. When you combine two vectors in a loop, you decide what happens when their lengths differ.
+:::
+
+## Growing a vector
+
+Growing a vector one element at a time looks similar in both languages:
+
+```{r}
+#| label: r-grow
+x <- c()
+for (i in 1:3) {
+  x <- c(x, i * 10)
+}
+x
+```
+
+```{rust}
+#| label: rust-grow
+let mut v = Vec::new();
+for i in 1..=3 {
+    v.push(i * 10);
+}
+println!("{:?}", v);
+```
+
+What happens underneath is different. `c(x, new)` builds a new vector and copies every existing element into it, so growing a vector this way gets slower as it gets longer. That's why R code preallocates with `numeric(n)` and fills in values by position.
+
+A Rust `Vec` keeps spare room at the end. When the room runs out, it typically allocates a bigger block and moves the elements over, so most calls to `push()` copy nothing. Pushing in a loop is ordinary Rust.
+
+When you know the final length in advance, `Vec::with_capacity(n)` reserves the room up front. Unlike R's `numeric(n)`, it creates no elements: the vector's length is still zero, so you fill it with `push()`. For `n` zeros that you then set by position, use `vec![0.0; n]`.
+
+::: {.callout-note title="Package developer notes: vectors in compiled code" collapse="true"}
+C code for an R package already indexes R vectors from zero: `REAL(x)[0]` is the first element of `x`. A Rust function that receives an R vector can view it as a slice of `f64` or `i32`, indexed the same way (@sec-extending-r).
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `5` is a vector of length one | `5` is a single value; vectors are `Vec` |
+| `c(10, 20, 30)` | `vec![10, 20, 30]` |
+| `numeric(3)`, `rep(7L, 3)` | `vec![0.0; 3]`, `vec![7; 3]` |
+| `c(1, "a")` converts both values to text | `vec![1, "a"]` doesn't compile |
+| `x[1]` is the first element | `v[0]` is the first element |
+| `x[4]` past the end is `NA` | `v[3]` past the end panics; `v.get(3)` returns `None` |
+| `x[2:3]` copies two elements | `&v[1..3]` refers to them without copying |
+| Arithmetic and recycling work on whole vectors | Loop over the elements |
+| `c(x, new)` copies the whole vector | `v.push(new)` usually copies nothing |

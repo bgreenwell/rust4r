@@ -1,0 +1,103 @@
+# Why Rust, for an R programmer {#sec-why-rust}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R is built for interactive analysis: you type a line, look at the result, and decide what to do next. Rust is built for a different job. It compiles programs ahead of time into fast machine code that runs without an interpreter, and it refuses to build a program when the compiler can see certain kinds of bugs. This chapter explains why that matters to someone who already writes R, what learning Rust will cost you, and how the rest of the book is organized. For the Rust project's own case, see "Who Rust Is For" in the Rust book's introduction [@rustbook].
+
+## Benefits for an R programmer
+
+### Speed where R can't vectorize
+
+Most of R's speed comes from vectorized functions such as `sum()`, `cumsum()`, and `%*%`, which hand the work to compiled C or Fortran code. The slow case is a loop where each step depends on the one before it, such as a simulation or a recursive filter. R has to interpret that loop one iteration at a time. Package developers usually move such loops to C or C++, often through Rcpp. Rust compiles to machine code that runs at comparable speed, and its compiler checks the memory safety that C and C++ leave to the programmer.
+
+### Programs that run without R
+
+A Rust program compiles to an executable file for one platform: an operating system and a kind of processor. You can give it to a colleague on the same platform who has never installed R, or run it on a server where R isn't available. Part V builds one, `rsummary`, a command-line tool that reads a CSV file and prints output in the style of `summary()` (@sec-capstone).
+
+### Bugs caught before the program runs
+
+R checks most things only when a line runs. Here's a function with a typo in the branch you rarely use:
+
+```{r}
+#| label: r-typo
+#| error: true
+area <- function(width, height, square = FALSE) {
+  if (square) {
+    width * widht
+  } else {
+    width * height
+  }
+}
+
+area(3, 4)
+area(3, square = TRUE)
+```
+
+R defined `area()` without complaint, and the first call worked. The typo only surfaced when the `square = TRUE` branch finally ran, which in a long analysis can be hours in. Don't worry about the syntax yet; @sec-setup introduces it. Here's the same function in Rust:
+
+```{rust}
+#| label: rust-typo
+#| error: true
+fn area(width: i32, height: i32, square: bool) -> i32 {
+    if square {
+        width * widht
+    } else {
+        width * height
+    }
+}
+
+fn main() {
+    println!("{}", area(3, 4, false));
+}
+```
+
+The program never runs. The compiler finds the misspelled name in a branch this program never takes, and it suggests the fix. The same idea extends further than typos: Rust checks types before the program runs (@sec-types), makes you handle missing values wherever they can occur (@sec-missingness), and rejects a `match` that forgets a case (@sec-enums).
+
+### Rust inside R packages
+
+You don't have to choose one language. R packages can call Rust code the way they call C, which lets you keep R for the analysis and move a slow or fragile piece into Rust. The last chapter (@sec-extending-r) covers how.
+
+## Costs for an R programmer
+
+Rust asks more of you up front than R does:
+
+- **No console.** You write a program, compile it, and run it. @sec-setup covers the workflow and the closest thing Rust has to a console.
+- **A strict compiler.** Rust rejects programs that R would run, sometimes for reasons that take a while to understand. Ownership and borrowing (@sec-ownership and @sec-borrowing) are the main source of early frustration. In return, the error messages are unusually specific, as the example above shows.
+- **More to write down.** Function signatures need types, and conversions between numeric types are explicit.
+- **Fewer statistical tools.** Rust's package registry, crates.io, has general-purpose libraries, but nothing close to CRAN's coverage of statistical methods.
+
+For interactive analysis, R remains the better tool. Rust pays off for the parts of your work that become programs: code that runs many times, runs for a long time, or runs where R isn't installed.
+
+## Ideas R and Rust share
+
+Many of Rust's rules are ideas R already has. The difference is in who enforces them and when:
+
+| Idea | In R | In Rust | Chapter |
+|----------------------|----------------------|----------------------|--------|
+| Every value has a type | Checked as each line runs | Checked when the program compiles | [-@sec-types] |
+| A class has fields of known types | A convention in S3, checked at runtime in S4 | Checked by the compiler for every struct | [-@sec-structs] |
+| A method exists for a class | Looked up at runtime by S3 dispatch | Checked by the compiler through traits | [-@sec-s3-traits] |
+| A value might be missing | Vectors of most types can hold `NA` | A type has to allow it, usually by wrapping the value in `Option` | [-@sec-missingness] |
+| Changing one vector leaves its copy alone | Copy-on-modify, out of sight | Ownership; copies are explicit, with `.clone()` | [-@sec-ownership] |
+| Cleanup runs automatically | `on.exit()`, when a function exits | `Drop`, when a value's owner goes out of scope | [-@sec-drop] |
+
+In each row, R enforces the idea at runtime, by convention, or not at all, while in Rust it's settled when the program compiles. Object-oriented programming makes the clearest case. S3 is informal, S4 adds formal class definitions, S7 modernizes them, and Rust's traits move the checking into the compiler. Part II follows that path one step at a time.
+
+## How to read this book
+
+The parts build on each other:
+
+- **Part I** (this chapter through @sec-missingness) covers the basics: setup, vectors, types, strings, and missing values.
+- **Part II** maps R's object systems (S3, S4, and S7) onto structs, traits, and enums. It's the core of the book.
+- **Part III** covers memory: copy-on-modify versus ownership, borrowing, and cleanup.
+- **Part IV** covers functional programming: iterators, closures, errors, and macros.
+- **Part V** builds complete programs, ending with the `rsummary` tool.
+- **The last chapter** calls Rust from R.
+
+If you write scripts and analyses, read the main text and skip the boxes marked "Package developer notes". If you write packages, those boxes and @sec-extending-r are for you. The preface describes the other boxes and the conventions for code.
+
+The book doesn't cover asynchronous code or writing your own macros beyond a light introduction, and it uses `unsafe` Rust only at the boundary with R's C code, in @sec-extending-r. For those, and for a second explanation of anything here, the official Rust book is the standard reference [@rustbook]. Each later chapter names the matching section.

@@ -1,0 +1,10 @@
+/.quarto/
+/_book/
+/*_files/
+.DS_Store
+.Rhistory
+.Rproj.user/
+.claude/
+
+**/*.quarto_ipynb
+/_book-crc/

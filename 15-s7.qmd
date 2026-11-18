@@ -1,0 +1,275 @@
+# S7 and the distribution classes in Rust {#sec-s7}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+S7 is a newer object system for R, meant as a successor to both S3 and S4. It was designed by the R Consortium's Object-Oriented Programming Working Group, which includes members of R Core, Bioconductor, and Posit [@s7]. It keeps S3's simplicity and adds what S4 brought: formal class definitions, typed properties, validators, and dispatch on several arguments. Several of its design choices land close to Rust's. This chapter builds the running class a third time, in S7, compares each piece with its Rust counterpart, and closes Part II by putting the Rust pieces from @sec-structs through @sec-enums together in one program. The matching section of the Rust book is "Characteristics of Object-Oriented Languages", which describes how Rust approaches objects, encapsulation, and inheritance [@rustbook, sec. 18.1].
+
+::: {.callout-note title="A package from CRAN"}
+S7 is the first of two exceptions to this book's base-R-only rule; the other is the package-building tools in @sec-extending-r. S7 isn't part of R; install it from CRAN with `install.packages("S7")`. The examples use version 0.2.2.
+:::
+
+## Classes and properties
+
+In S7, `new_class()` defines a class and returns its constructor. Properties, S7's name for fields, are declared with their types, and a validator states the rules:
+
+```{r}
+#| label: r-s7-class
+library(S7)
+
+distribution <- new_class("distribution", abstract = TRUE)
+
+normal <- new_class("normal",
+  parent = distribution,
+  properties = list(mean = class_double, sd = class_double),
+  validator = function(self) {
+    if (length(self@mean) != 1) {
+      "@mean must be a single number"
+    } else if (length(self@sd) != 1 || self@sd <= 0) {
+      "@sd must be a single positive number"
+    }
+  }
+)
+
+dist <- normal(mean = 0, sd = 2)
+dist
+```
+
+The class `distribution` is abstract, S7's version of a virtual class, and `normal` names it as its parent. A validator returns `NULL` when the object is valid and a message when it isn't.
+
+A `class_double` property holds a double vector of any length, not one number like Rust's `f64`, so the validator checks the lengths too. The constructor checks both the property types and the validator:
+
+```{r}
+#| label: r-s7-errors
+#| error: true
+normal(mean = "zero", sd = 1)
+normal(mean = 0, sd = -1)
+distribution()
+```
+
+So far this matches S4. The difference comes after construction. S4 let `dist@sd <- -1` through (@sec-s4); S7 runs the validator again whenever a property is assigned with `@`:
+
+```{r}
+#| label: r-s7-set
+#| error: true
+dist@sd <- -1
+dist@sd
+```
+
+The assignment failed and `dist` still holds a valid standard deviation.
+
+::: {.callout-tip title="The same idea in R"}
+Re-validating on every `@` assignment gives R the guarantee that Rust gets from private fields and a validating constructor (@sec-s4): an object that exists is valid. Both languages check the rule itself when the code runs, in the validator or in `new()`. Rust adds a compile-time check that code outside the module never sets a field directly. S7 catches a bad assignment only when it runs, so a mistake in a rarely used branch surfaces late. Neither guarantee is airtight: base R's `attr()` can change a property without running the validator, and code inside a Rust module can set a field to anything.
+:::
+
+## Generics and methods
+
+In S7, `new_generic()` creates a generic, and `method()` registers a method for a class. S7 can also add methods to existing S3 generics such as `mean()`:
+
+```{r}
+#| label: r-s7-generics
+variance <- new_generic("variance", "dist")
+method(variance, normal) <- function(dist) dist@sd^2
+method(mean, normal) <- function(x, ...) x@mean
+
+variance(dist)
+mean(dist)
+```
+
+A method registered for the abstract parent applies to every subclass, which makes it S7's version of a default trait method:
+
+```{r}
+#| label: r-s7-default
+std_dev <- new_generic("std_dev", "dist")
+method(std_dev, distribution) <- function(dist) sqrt(variance(dist))
+
+std_dev(dist)
+```
+
+Unlike S3's `.default` method in @sec-s3-traits, this one applies only to distributions. Like every R method, though, it can still fail at runtime, here on a uniform distribution that has no `variance()` method:
+
+```{r}
+#| label: r-s7-missing
+#| error: true
+uniform <- new_class("uniform",
+  parent = distribution,
+  properties = list(min = class_double, max = class_double)
+)
+
+std_dev(uniform(min = 0, max = 6))
+```
+
+## Printing and operators
+
+S7 methods for `print()` and for operators work like the S3 and S4 versions in @sec-display and @sec-operators, and an operator method can dispatch on both operands, as in @sec-multiple-dispatch:
+
+```{r}
+#| label: r-s7-print-plus
+method(print, normal) <- function(x, ...) {
+  cat("Normal(mean = ", x@mean, ", sd = ", x@sd, ")\n", sep = "")
+  invisible(x)
+}
+
+method(`+`, list(normal, normal)) <- function(e1, e2) {
+  normal(mean = e1@mean + e2@mean, sd = sqrt(e1@sd^2 + e2@sd^2))
+}
+
+normal(mean = 0, sd = 3) + normal(mean = 1, sd = 4)
+```
+
+The `list(normal, normal)` argument is S7's form of an S4 signature: a method for a pair of classes.
+
+## S7 next to Rust
+
+| S7 | Rust | Chapter |
+|----------------------|----------------------|--------|
+| `new_class()` with `properties` | `struct` with typed fields | [-@sec-structs] |
+| `class_double`, checked for length one | `f64` | [-@sec-types] |
+| `validator`, run on creation and on each `@` assignment | A constructor that returns `Result`, plus private fields | [-@sec-s4] |
+| `abstract = TRUE` | A trait | [-@sec-s4] |
+| `new_generic()` and `method()` | Trait methods and `impl` | [-@sec-s3-traits] |
+| A method for the abstract parent | A default trait method | [-@sec-s3-traits] |
+| `method(print, normal)` | `impl fmt::Display for Normal` | [-@sec-display] |
+| ``method(`+`, list(normal, normal))`` | `impl Add<Normal> for Normal` | [-@sec-multiple-dispatch] |
+| Types, methods, and validity checked at runtime | Types, privacy, and trait methods checked at compile time; validity checked in `new()` | |
+
+The last row is the difference that remains. S7 moved R's object system toward declared types, validated objects, and explicit interfaces. Rust's compiler checks the types and interfaces before the program runs and keeps outside code from going around `new()`, while S7 checks all three when the code runs.
+
+::: {.callout-note title="Package developer notes: S7 in a package" collapse="true"}
+A package that uses S7 should call `S7::methods_register()` from its `.onLoad()` function, so that its methods for generics in other packages, S3, S4, or S7, are registered when the package loads. The S7 documentation recommends doing so even when it isn't strictly needed. In Rust, an `impl` takes effect wherever its type and trait are visible, with no registration step.
+:::
+
+## The distribution classes in Rust
+
+Here's the Rust version of the running class, with every piece from Part II in one program. It has private fields and validating constructors (@sec-s4), the `Distribution` trait with a default method (@sec-s3-traits), `Display` (@sec-display), and `Add` (@sec-operators):
+
+```{rust}
+#| label: rust-running-class
+mod distributions {
+    use std::fmt;
+    use std::ops::Add;
+
+    pub trait Distribution {
+        fn mean(&self) -> f64;
+        fn variance(&self) -> f64;
+
+        fn std_dev(&self) -> f64 {
+            self.variance().sqrt()
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Normal {
+        mean: f64,
+        sd: f64,
+    }
+
+    impl Normal {
+        pub fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+            if sd > 0.0 {
+                Ok(Normal { mean, sd })
+            } else {
+                Err(format!("sd must be positive, not {sd}"))
+            }
+        }
+    }
+
+    impl Distribution for Normal {
+        fn mean(&self) -> f64 {
+            self.mean
+        }
+
+        fn variance(&self) -> f64 {
+            self.sd * self.sd
+        }
+    }
+
+    impl fmt::Display for Normal {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "Normal(mean = {}, sd = {})", self.mean, self.sd)
+        }
+    }
+
+    impl Add for Normal {
+        type Output = Normal;
+
+        fn add(self, other: Normal) -> Normal {
+            Normal {
+                mean: self.mean + other.mean,
+                sd: self.sd.hypot(other.sd),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Uniform {
+        min: f64,
+        max: f64,
+    }
+
+    impl Uniform {
+        pub fn new(min: f64, max: f64) -> Result<Uniform, String> {
+            if min < max {
+                Ok(Uniform { min, max })
+            } else {
+                Err(format!(
+                    "min must be less than max, not {min} and {max}"
+                ))
+            }
+        }
+    }
+
+    impl Distribution for Uniform {
+        fn mean(&self) -> f64 {
+            (self.min + self.max) / 2.0
+        }
+
+        fn variance(&self) -> f64 {
+            (self.max - self.min).powi(2) / 12.0
+        }
+    }
+
+    impl fmt::Display for Uniform {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "Uniform(min = {}, max = {})", self.min, self.max)
+        }
+    }
+}
+
+use distributions::{Distribution, Normal, Uniform};
+
+fn main() {
+    let x = Normal::new(0.0, 3.0).expect("valid parameters");
+    let y = Normal::new(1.0, 4.0).expect("valid parameters");
+    let u = Uniform::new(0.0, 6.0).expect("valid parameters");
+
+    println!("x + y = {}", x + y);
+    println!("{u}: mean {}, sd {}", u.mean(), u.std_dev());
+
+    if let Err(message) = Uniform::new(6.0, 0.0) {
+        println!("rejected: {message}");
+    }
+}
+```
+
+Everything that touches the private fields lives inside the `distributions` module, including `Display` and `Add`. Outside it, `main()` can get a distribution only from `new()` or from `+`, so both have to keep the rule. That's why `add()` calls `hypot()`, which computes the same quantity as `(a * a + b * b).sqrt()` without squaring first. The version in @sec-operators squares each standard deviation, and for two valid but tiny values such as `1e-200`, the squares round to zero and the sum gets an `sd` of 0. The S7 method above squares too, but with the same inputs it stops with the validator's error instead, because its result goes through `normal()`. Rust's `add()` builds the struct directly, so nothing would stop an `sd` of 0.
+
+The line `use distributions::{Distribution, Normal, Uniform};` brings the three names into scope so `main()` can write `Normal` instead of `distributions::Normal`. Bringing in the trait matters for another reason, too: a trait's methods, such as `u.mean()`, can only be called where the trait itself is in scope.
+
+Part III turns from what objects are to how they live in memory: what happens when a value is copied, moved, borrowed, or cleaned up.
+
+## Summary
+
+| R (S7) | Rust |
+|---------------------------|---------------------------|
+| `new_class()` with typed `properties` | A `struct` with typed fields |
+| A validator, run on creation and on each `@` assignment | A validating `new()` and private fields |
+| An abstract class | A trait |
+| `new_generic()` and `method()` | Trait methods and `impl` blocks |
+| A method for the abstract parent | A default method |
+| ``method(`+`, list(normal, normal))`` | `impl Add<Normal> for Normal` |
+| `S7::methods_register()` in `.onLoad()` | No registration |
+| Types, methods, and validity checked at runtime | Types, privacy, and trait methods checked at compile time; validity checked in `new()` |

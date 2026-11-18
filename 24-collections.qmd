@@ -1,0 +1,249 @@
+# Collections {#sec-collections}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R does a lot with a few containers. A named vector or list looks values up by name, `table()` counts, `split()` and `tapply()` group, `unique()` and `%in%` handle sets, and a data frame holds a table of mixed columns. Rust's standard library splits those jobs among separate types. The module `std::collections` has `HashMap` and `BTreeMap` for lookups by key and `HashSet` and `BTreeSet` for sets, and the `Vec` you already know holds values in order. This chapter pairs each R idiom with the collection that does the job in Rust, and ends with the question R answers with a data frame. The matching section of the Rust book is "Storing Keys with Associated Values in Hash Maps" [@rustbook, sec. 8.3].
+
+## Looking values up by name
+
+A named vector maps names to values:
+
+```{r}
+#| label: r-named
+sd <- c(height = 7.6, weight = 12.1)
+sd[["height"]]
+sd["age"]
+length(sd)
+```
+
+Rust's `HashMap` maps keys to values:
+
+```{rust}
+#| label: rust-hashmap
+use std::collections::HashMap;
+
+fn main() {
+    let mut sd = HashMap::new();
+    sd.insert("height", 7.6);
+    sd.insert("weight", 12.1);
+
+    println!("{:?}", sd.get("height"));
+    println!("{:?}", sd.get("age"));
+    println!("{}", sd.len());
+}
+```
+
+The `insert()` method adds a key and its value, and `sd` is `mut` because adding changes it. Inserting a key that's already there replaces its value, so a map holds each key once. A named vector can repeat a name, and then `[[` finds the first match. The compiler infers the map's type, `HashMap<&str, f64>`, from the first `insert()`. Every key has one type and every value has one type, so a map can't mix numbers and text the way a list can; an enum (@sec-enums) is the way to store values of several kinds.
+
+The `get()` method returns an `Option` (@sec-missingness): `Some` when the key is present, `None` when it isn't. R's `sd["age"]` answers the same question with an `NA` named `<NA>`, and `sd[["age"]]` with an error. Here the type is `Option<&f64>`, though `{:?}` prints it like a number. What `Some` holds is a reference to the value, which stays in the map (@sec-borrowing). Adding `.copied()`, as in `sd.get("height").copied()`, gives an `Option<f64>`.
+
+R code sometimes uses an environment as a hash map instead, because changing a list can copy it, while an environment is always changed in place (@sec-environments). In Rust, a `HashMap` is the one tool for both jobs: it's changed in place through `mut` or `&mut`, and copied only with `.clone()`.
+
+::: {.callout-warning title="Where the analogy breaks"}
+A named list or vector keeps its elements in the order they were added. A `HashMap` doesn't: iterating over one, or printing it with `{:?}`, visits the keys in an order that depends on how they're stored, and that order can change from one run of the program to the next. That's why the example prints single lookups rather than the whole map. When the order matters, use a `BTreeMap`, which keeps its keys sorted.
+:::
+
+## Counting with `table()`
+
+R's `table()` counts how often each value occurs:
+
+```{r}
+#| label: r-table
+outcomes <- c("remission", "relapse", "remission", "stable", "remission",
+              "relapse")
+table(outcomes)
+```
+
+In Rust, counting is a loop over the values with a map from each value to its count:
+
+```{rust}
+#| label: rust-count
+use std::collections::BTreeMap;
+
+fn main() {
+    let outcomes = vec![
+        "remission", "relapse", "remission", "stable", "remission",
+        "relapse",
+    ];
+    let mut counts = BTreeMap::new();
+    for outcome in outcomes {
+        *counts.entry(outcome).or_insert(0) += 1;
+    }
+    println!("{:?}", counts);
+}
+```
+
+The line inside the loop does the counting. The call `counts.entry(outcome)` finds the entry for `outcome`, whether or not it exists yet; `.or_insert(0)` fills in a 0 if it doesn't, and returns a mutable reference to the count; `*... += 1` adds one through the reference (@sec-borrowing). A `BTreeMap` keeps its keys sorted, so the counts print in alphabetical order, as `table()`'s do.
+
+::: {.callout-warning title="Where the analogy breaks"}
+A map holds only the keys it was given. For a factor, `table()` also lists the levels that never occur, with a count of 0, and `split()` gives them empty groups. To get the zeros in Rust, insert each level with a count of 0 before the loop.
+
+R's `table()` counts numbers too, by converting them to strings. Rust is stricter about keys: a `BTreeMap` sorts its keys, so they need the `Ord` trait, and a `HashMap`'s keys need `Eq` and `Hash`, for equality and hashing. A set's values have the same requirements. Integers and strings meet them, but `f64` doesn't, because `NaN` isn't equal to itself. A map keyed by `f64` doesn't compile, so count integer codes or, as `table()` does, strings.
+:::
+
+## Grouping with `split()` and `tapply()`
+
+R's `split()` groups values by a second variable, and `tapply()` applies a function to each group:
+
+```{r}
+#| label: r-tapply
+month <- c(5, 5, 6, 6, 6, 7)
+temp <- c(67, 72, 78, 74, 85, 84)
+split(temp, month)
+tapply(temp, month, mean)
+```
+
+In Rust, a map from each group to a vector of its values does what `split()` does, and a loop over the map does what `tapply()` does:
+
+```{rust}
+#| label: rust-group
+use std::collections::BTreeMap;
+
+fn main() {
+    let month = vec![5, 5, 6, 6, 6, 7];
+    let temp = vec![67.0, 72.0, 78.0, 74.0, 85.0, 84.0];
+
+    let mut groups: BTreeMap<i32, Vec<f64>> = BTreeMap::new();
+    for (m, t) in month.iter().zip(temp.iter()) {
+        // m is an &i32 and t an &f64, and * copies each number out
+        groups.entry(*m).or_default().push(*t);
+    }
+    println!("{:?}", groups);
+
+    for (m, temps) in &groups {
+        let mean = temps.iter().sum::<f64>() / temps.len() as f64;
+        println!("{m}: {mean:.2}");
+    }
+}
+```
+
+Calling `or_default()` is the same as `or_insert()` with the type's default value, here an empty vector, so each month's vector is created the first time the month appears. Here `zip()` (@sec-iterators) walks through the two vectors together, as `split()` does with its two arguments. Looping over `&groups` borrows the map and visits each key with its value, in key order.
+
+## Sets
+
+R treats any vector as a set when you call `union()`, `intersect()`, `setdiff()`, or `%in%` on it:
+
+```{r}
+#| label: r-sets
+a <- c("ozone", "temp", "wind")
+b <- c("temp", "solar")
+union(a, b)
+intersect(a, b)
+setdiff(a, b)
+"temp" %in% a
+```
+
+Rust has set types, which hold each value at most once:
+
+```{rust}
+#| label: rust-sets
+use std::collections::BTreeSet;
+
+fn main() {
+    let a: BTreeSet<&str> =
+        vec!["ozone", "temp", "wind"].into_iter().collect();
+    let b: BTreeSet<&str> = vec!["temp", "solar"].into_iter().collect();
+
+    println!("{:?}", a.union(&b).collect::<Vec<_>>());
+    println!("{:?}", a.intersection(&b).collect::<Vec<_>>());
+    println!("{:?}", a.difference(&b).collect::<Vec<_>>());
+    println!("{}", a.contains("temp"));
+}
+```
+
+Given the type, `collect()` builds a set as readily as a vector. The set operations, such as `union()`, return iterators, so `collect()` turns each into a vector for printing. Writing `Vec<_>` lets the compiler fill in the element type, here `&&str`: the iterators yield references to the sets' elements, each of which is already a `&str`. A `BTreeSet` keeps its values sorted, which is why the union comes out in alphabetical order rather than R's order of first appearance. Its unordered counterpart, `HashSet`, is usually faster for large sets.
+
+R's `unique()` keeps the values in the order they first appear, and in Rust a set and a vector together do the same:
+
+```{r}
+#| label: r-unique
+unique(c(3, 1, 3, 2, 1))
+```
+
+```{rust}
+#| label: rust-unique
+use std::collections::HashSet;
+
+fn main() {
+    let values = vec![3, 1, 3, 2, 1];
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for v in values {
+        if seen.insert(v) {
+            unique.push(v);
+        }
+    }
+    println!("{:?}", unique);
+}
+```
+
+For a set, `insert()` returns `true` when the value wasn't in it yet, so each value is pushed onto `unique` the first time it's seen. The loop uses `v` twice, which works because integers are `Copy` (@sec-ownership). With `String`s, `seen.insert(v)` would move `v` into the set, and `unique.push(v)` wouldn't compile. Looping over `&values` instead stores references in both collections.
+
+## Data frames
+
+A data frame is a named list of columns of the same length, and the columns can have different types. Rust's standard library has no data frame. A table of data is usually a vector of structs, one struct per row, with a field for each column. Here's a small data frame in R and the same data as a vector of structs in Rust:
+
+```{r}
+#| label: r-data-frame
+days <- data.frame(
+  month = c(5, 5, 6, 6),
+  temp = c(67, 72, 78, 74),
+  ozone = c(41, NA, 12, 18)
+)
+mean(days$temp[days$month == 6])
+mean(days$ozone, na.rm = TRUE)
+```
+
+```{rust}
+#| label: rust-rows
+struct Day {
+    month: u32,
+    temp: f64,
+    ozone: Option<f64>,
+}
+
+fn main() {
+    let days = vec![
+        Day { month: 5, temp: 67.0, ozone: Some(41.0) },
+        Day { month: 5, temp: 72.0, ozone: None },
+        Day { month: 6, temp: 78.0, ozone: Some(12.0) },
+        Day { month: 6, temp: 74.0, ozone: Some(18.0) },
+    ];
+
+    let june: Vec<f64> = days
+        .iter()
+        .filter(|d| d.month == 6)
+        .map(|d| d.temp)
+        .collect();
+    println!("{}", june.iter().sum::<f64>() / june.len() as f64);
+
+    let ozone: Vec<f64> = days.iter().filter_map(|d| d.ozone).collect();
+    println!("{}", ozone.iter().sum::<f64>() / ozone.len() as f64);
+}
+```
+
+The struct does the work of the data frame's column types, and `Option<f64>` marks the one column that can be missing. Selecting rows is `filter()`, and selecting a column is `map()`. For `Option` values, `filter_map()` combines the two: it keeps the `Some` values, unwrapped, and drops the `None`s, as `na.rm = TRUE` drops `NA`s. Unlike `na.rm = TRUE`, it keeps a `Some(f64::NAN)`; @sec-missingness showed how to skip those too.
+
+::: {.callout-warning title="Where the analogy breaks"}
+A data frame stores its columns separately: `days$temp` is a whole numeric vector, ready for vectorized functions. A vector of structs stores rows, so a column has to be gathered from every row, as `map(|d| d.temp)` did. Rust programs that work column by column can store each column as its own `Vec` instead, which is how the capstone in @sec-capstone stores the columns it summarizes. For large tables, crates such as Polars provide real data frames.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| Named vector or list, `x[["name"]]` | `HashMap`, `map.get("name")` returning `Option<&V>` |
+| Names can repeat | Inserting a key again replaces its value |
+| Environment used as a hash map | `HashMap`, changed through `mut` or `&mut` |
+| Elements stay in insertion order | `HashMap` order is unspecified; `BTreeMap` sorts by key |
+| `table(x)` | `*counts.entry(x).or_insert(0) += 1` |
+| Any vector can be counted or grouped | Keys need `Ord`, or `Eq` and `Hash`, which `f64` lacks |
+| `split(x, g)`, `tapply(x, g, f)` | `BTreeMap<K, Vec<V>>` with `entry().or_default().push()` |
+| `union()`, `intersect()`, `setdiff()`, `%in%` | `BTreeSet` or `HashSet` methods, `contains()` |
+| `unique(x)` | A `HashSet` of seen values and a `Vec` |
+| A data frame of columns | A `Vec` of structs, one per row |
+| `na.rm = TRUE` | `filter_map()` drops `None`s, but not `NaN`s |

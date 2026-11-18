@@ -1,0 +1,35 @@
+name: Typo, wording, or layout
+description: A typo, a confusing sentence, a broken link, or something that displays badly in the HTML or PDF.
+labels: [documentation]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Where
+      description: The chapter and section, the page's URL, or the PDF page number.
+      placeholder: "Chapter 5, Strings; or PDF page 48"
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Format
+      description: Where you saw it.
+      options:
+        - HTML
+        - PDF
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: passage
+    attributes:
+      label: The passage
+      description: Copy the text, or describe what you see. A screenshot helps for layout problems.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording
+      description: How you'd write it, if you have an idea.

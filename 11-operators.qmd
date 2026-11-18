@@ -1,0 +1,211 @@
+# Operator overloading {#sec-operators}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+Both languages let you define what `+` does for your own classes. In R, `+` is a function with a special way of being called, and an S3 method gives it a meaning for a class, either for a single operator such as `"+.normal"` or for the whole `Ops` group at once. In Rust, `x + y` is shorthand for a call to a trait method. The operators you can overload have traits in the standard library, mostly in its `std::ops` module, such as `Add` for `+` and `Mul` for `*`. The running class gives operators a real meaning: the sum of two independent normal random variables is itself normal, with the means added and the variances added. The matching section of the Rust book is "Advanced Traits", which covers operator overloading [@rustbook, sec. 20.2].
+
+## Defining `+`
+
+An S3 method for `+` takes the two operands, conventionally named `e1` and `e2`:
+
+```{r}
+#| label: r-plus
+normal <- function(mean = 0, sd = 1) {
+  structure(list(mean = mean, sd = sd), class = "normal")
+}
+
+format.normal <- function(x, ...) {
+  paste0("Normal(mean = ", x$mean, ", sd = ", x$sd, ")")
+}
+
+print.normal <- function(x, ...) {
+  cat(format(x), "\n")
+  invisible(x)
+}
+
+"+.normal" <- function(e1, e2) {
+  normal(e1$mean + e2$mean, sqrt(e1$sd^2 + e2$sd^2))
+}
+
+normal(0, 3) + normal(1, 4)
+```
+
+In Rust, you implement the `Add` trait:
+
+```{rust}
+#| label: rust-add
+use std::ops::Add;
+
+#[derive(Debug, Clone, Copy)]
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl Add for Normal {
+    type Output = Normal;
+
+    fn add(self, other: Normal) -> Normal {
+        Normal {
+            mean: self.mean + other.mean,
+            sd: (self.sd * self.sd + other.sd * other.sd).sqrt(),
+        }
+    }
+}
+
+fn main() {
+    let x = Normal { mean: 0.0, sd: 3.0 };
+    let y = Normal { mean: 1.0, sd: 4.0 };
+    println!("{:?}", x + y);
+    println!("{:?}", x);
+}
+```
+
+Three things are new here:
+
+- `type Output = Normal;` names the type that `+` produces. The trait leaves it open because adding two values doesn't always produce the same type; @sec-multiple-dispatch uses that.
+- `add()` takes `self`, not `&self`, so `x + y` hands both values to the method.
+- `#[derive(Clone, Copy)]` lets a `Normal` be copied the way a number is. Without it, handing `x` to `add()` would *move* it, and the last line, which prints `x` again, wouldn't compile. A struct of plain numbers can be `Copy`; @sec-ownership explains moves and what can't be copied.
+
+## Operators with a number
+
+Scaling a random variable by a constant multiplies its mean by the constant and its standard deviation by the constant's absolute value. In R, the method has to work whichever side the number is on, because R dispatches on either operand.
+
+An `Ops` group method handles every arithmetic and comparison operator in one function, with `.Generic` holding the operator's name:
+
+```{r}
+#| label: r-ops-group
+Ops.normal <- function(e1, e2) {
+  if (.Generic == "*") {
+    if (is.numeric(e1)) {
+      k <- e1
+      dist <- e2
+    } else {
+      k <- e2
+      dist <- e1
+    }
+    return(normal(k * dist$mean, abs(k) * dist$sd))
+  }
+  stop("`", .Generic, "` is not defined for normal distributions")
+}
+
+normal(1, 3) * 2
+2 * normal(1, 3)
+```
+
+The call `2 * normal(1, 3)` reached `Ops.normal()` even though its first operand is a plain number, so the method checks which argument is which. The `"+.normal"` method still handles `+`, because a method for a single operator takes precedence over the group method.
+
+In Rust, each order is a separate implementation, and the type in angle brackets after `Mul` names the right-hand operand. The `Add` implementation above left it out, which means the same type on both sides: `impl Add for Normal` is short for `impl Add<Normal> for Normal`. Here are the two orders for `Mul`:
+
+```{rust}
+#| label: rust-mul
+use std::ops::Mul;
+
+#[derive(Debug, Clone, Copy)]
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl Mul<f64> for Normal {
+    type Output = Normal;
+
+    fn mul(self, k: f64) -> Normal {
+        Normal { mean: self.mean * k, sd: self.sd * k.abs() }
+    }
+}
+
+impl Mul<Normal> for f64 {
+    type Output = Normal;
+
+    fn mul(self, dist: Normal) -> Normal {
+        dist * self
+    }
+}
+
+fn main() {
+    let y = Normal { mean: 1.0, sd: 3.0 };
+    println!("{:?}", y * 2.0);
+    println!("{:?}", 2.0 * y);
+}
+```
+
+The implementation `Mul<f64> for Normal` covers `Normal * f64`, and `Mul<Normal> for f64` covers `f64 * Normal`. The second one implements a standard-library trait for a standard-library type, which the orphan rule from @sec-s3-traits allows because `Normal`, a type from this program, appears in it. The operand types must match exactly: `2 * y` doesn't compile, because `2` is an integer and only `f64 * Normal` is defined (@sec-types).
+
+::: {.callout-tip title="The same idea in R"}
+R's `Ops.normal()` and Rust's two `Mul` implementations answer the same question: what happens when this class meets a number, on either side? R answers it inside one function, at runtime, with an `if`. Rust answers it with one implementation per combination of types, chosen by the compiler.
+:::
+
+## Operators that aren't defined
+
+R's group method has to reject the operators it doesn't support itself:
+
+```{r}
+#| label: r-undefined-op
+#| error: true
+normal(1, 3) / 2
+```
+
+In Rust, an operator without an implementation is a compile error: `y / 2.0` fails with a message that `Normal` doesn't implement `Div<f64>`. Nothing has to be rejected at runtime, because nothing undefined can be called.
+
+## The operator traits
+
+The traits for Rust's operators live in `std::ops` or, for comparisons, in `std::cmp`. Here are the common ones:
+
+| Operator | Rust trait | R |
+|---------------|-------------------------|-------------------------|
+| `+`, `-`, `*`, `/`, `%` | `Add`, `Sub`, `Mul`, `Div`, `Rem` | `Ops` group, `Arith` part |
+| Unary `-` | `Neg` | `Ops` group, with `e2` missing |
+| `==`, `!=` | `PartialEq` | `Ops` group, `Compare` part |
+| `<`, `>`, `<=`, `>=` | `PartialOrd` | `Ops` group, `Compare` part |
+| `x[i]` | `Index` | `"[.normal"` |
+| `+=` | `AddAssign` | None; `x <- x + y` |
+
+Some operators, such as `=` and `&&`, have no trait and can't be overloaded [@rust-std].
+
+Equality usually doesn't need hand-written code. Deriving `PartialEq` makes `==` compare two values field by field. For `f64` fields that comparison is exact, with the rounding caveats from @sec-types:
+
+```{rust}
+#| label: rust-partial-eq
+#[derive(Debug, PartialEq)]
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+fn main() {
+    let a = Normal { mean: 0.0, sd: 1.0 };
+    let b = Normal { mean: 0.0, sd: 1.0 };
+    println!("{}", a == b);
+}
+```
+
+In R, `==` on two `normal` objects goes to `Ops.normal()`, which rejects it. Comparing whole objects in R is usually done with `identical()` or `all.equal()` instead. The derived `==` is exact, like `identical()`, not tolerant like `all.equal()`.
+
+::: {.callout-warning title="Where the analogy breaks"}
+R lets you invent operators. Any function named with percent signs, such as `%+%` or `%>%`, works as an infix operator. Rust's set of operators is fixed: you can give many of the existing ones meaning for your types, through traits like those in the table, but you can't add new ones.
+:::
+
+## When both operands have methods
+
+Adding a `normal` to an object of another class with its own `Ops` method raises a question: whose method should R use? R's rule is that if the two operands' methods differ, it warns about incompatible methods and falls back to the built-in operator, which usually fails on lists. Since R 4.3.0, a class can settle the conflict by defining a method for `chooseOpsMethod()`. Rust has no such conflict, because an implementation names both operand types, as the next chapter shows.
+
+::: {.callout-note title="Package developer notes: Ops methods in a package" collapse="true"}
+An `Ops` method is registered like any other S3 method, with `S3method(Ops, normal)` in the `NAMESPACE` file [@r-exts, sec. 1.5.2]. Rust operator implementations need no registration: an `impl Add for Normal` in a crate applies wherever `Normal` is used.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `"+.normal" <- function(e1, e2) ...` | `impl Add for Normal` |
+| `Ops.normal()` covers the arithmetic, comparison, and logical operators | Operator traits such as `Add` and `Mul` |
+| One method handles both operand orders | One `impl` per combination of types |
+| Undefined operators fail at runtime | Undefined operators don't compile |
+| `identical()` or an `==` method | `#[derive(PartialEq)]` |
+| New operators such as `%+%` | A fixed set of operators |
+| Conflicting methods warn; `chooseOpsMethod()` settles them | Each `impl` names both operand types |

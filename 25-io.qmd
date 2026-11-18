@@ -1,0 +1,339 @@
+# Reading and writing data {#sec-io}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R reads a whole file with `readLines()`, a table with `read.csv()`, and writes them back with `writeLines()` and `write.csv()`. Rust's standard library handles plain-text files: `std::fs` reads and writes whole files, and `std::io` reads them line by line. For CSV files, the usual choice is the `csv` crate [@csv], used together with `serde` [@serde] to turn each row into a struct. This is the first chapter whose examples use crates, so its examples marked `src/main.rs` are built with Cargo against the versions listed in the preface. To run them in a project of your own, add the crates with `cargo add csv` and `cargo add serde --features derive`; the `derive` feature turns on the `#[derive(Deserialize)]` used below, and @sec-crates explains `Cargo.toml`. The examples read `data/airquality.csv`, R's `airquality` data saved with `write.csv(airquality, "data/airquality.csv", row.names = FALSE)`: daily ozone, solar radiation, wind, and temperature readings in New York from May to September 1973, with missing values written as `NA`. The matching section of the Rust book is "Reading a File" [@rustbook, sec. 12.2].
+
+## Reading a whole file
+
+R's `readLines()` reads a file into a character vector, one element per line:
+
+```{r}
+#| label: r-readlines
+lines <- readLines("data/airquality.csv")
+head(lines, 3)
+length(lines)
+```
+
+In Rust, `fs::read_to_string()` reads it into one `String`, and `lines()` splits that into lines as they're needed:
+
+```{rust}
+#| label: rust-read-to-string
+use std::error::Error;
+use std::fs;
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let text = fs::read_to_string("data/airquality.csv")?;
+    for line in text.lines().take(3) {
+        println!("{line}");
+    }
+    println!("{}", text.lines().count());
+    Ok(())
+}
+```
+
+Reading a file can fail, so `read_to_string()` returns a `Result`, and `?` passes any error up from `main()` (@sec-errors). The call `take(3)` stops an iterator after three items, like R's `head()`. The loop uses up that iterator (@sec-iterators), so counting the lines takes a second call to `text.lines()`. A relative path such as `data/airquality.csv` is resolved from the directory the program runs in, as in R it's resolved from `getwd()`.
+
+A missing file is an error in both languages:
+
+```{r}
+#| label: r-missing-file
+#| error: true
+readLines("data/missing.csv")
+```
+
+```{rust}
+#| label: rust-missing-file
+#| error: true
+use std::error::Error;
+use std::fs;
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let text = fs::read_to_string("data/missing.csv")?;
+    println!("{text}");
+    Ok(())
+}
+```
+
+The error is an `io::Error`, printed in its `{:?}` form because `main()` returned it. Before `?` passes it up, its `kind()` method returns `io::ErrorKind::NotFound`, a variant a program can `match` on. R's error says only "cannot open the connection", with the reason in a warning, so R code usually checks `file.exists()` first.
+
+## Reading line by line
+
+Reading a whole file at once is fine for small files. For large ones, R opens a connection and reads from it in pieces, here one line at a time; Rust wraps the file in a `BufReader`, which reads it in blocks and hands out one line at a time. Here both count the rows with a missing value:
+
+```{r}
+#| label: r-connection
+con <- file("data/airquality.csv", "r")
+missing <- 0
+while (length(line <- readLines(con, n = 1)) > 0) {
+  fields <- strsplit(line, ",", fixed = TRUE)[[1]]
+  if (any(fields == "NA")) missing <- missing + 1
+}
+close(con)
+missing
+```
+
+```{rust}
+#| label: rust-bufreader
+use std::error::Error;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let file = File::open("data/airquality.csv")?;
+    let reader = BufReader::new(file);
+    let mut missing = 0;
+    for line in reader.lines() {
+        let line = line?;
+        if line.split(',').any(|field| field == "NA") {
+            missing += 1;
+        }
+    }
+    println!("{missing}");
+    Ok(())
+}
+```
+
+Here `reader.lines()` yields a `Result` for each line, because reading can fail partway through a file, so `let line = line?;` takes the line out or passes the error up. Reusing the name `line` for the unwrapped value is allowed: the new `let` *shadows* the old one, and the new `line` can have a different type, a `String` instead of a `Result`.
+
+The iterator method `any()` is the counterpart of R's `any()`, and it stops at the first field that's `NA`. The single quotes in `','` write a `char`, one character, rather than a string; `split()` accepts either. The line `use std::io::{BufRead, BufReader};` brings in the `BufReader` type and the `BufRead` trait, whose `lines()` method needs to be in scope to be called (@sec-s7). There's no `close()`: the file is closed when `reader` is dropped at the end of `main()` (@sec-drop).
+
+## Parsing fields by hand
+
+Turning a line into numbers is a matter of splitting it and parsing each field, with `NA` becoming `None` (@sec-missingness):
+
+```{rust}
+#| label: rust-parse-fields
+use std::error::Error;
+use std::fs;
+use std::num::ParseFloatError;
+
+fn parse_field(text: &str) -> Result<Option<f64>, ParseFloatError> {
+    if text == "NA" {
+        Ok(None)
+    } else {
+        text.parse().map(Some)
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let text = fs::read_to_string("data/airquality.csv")?;
+    let mut lines = text.lines();
+    let header = lines.next().unwrap(); // panics if the file is empty
+    println!("{header}");
+
+    let mut ozone = Vec::new();
+    for line in lines {
+        // Ozone, the first field; split() always yields a piece, so no panic
+        let first = line.split(',').next().unwrap();
+        ozone.push(parse_field(first)?);
+    }
+    // Each x is an &Option<f64>, and *x copies the Option out
+    let present: Vec<f64> = ozone.iter().filter_map(|x| *x).collect();
+    println!("{} missing", ozone.len() - present.len());
+    println!("{}", present.iter().sum::<f64>() / present.len() as f64);
+    Ok(())
+}
+```
+
+Calling `next()` takes one item from an iterator, as an `Option` that's `None` once the iterator is used up. Here it takes the header line off the front, leaving the rest for the loop, and `unwrap()` takes the header out of its `Some`. Taking an item changes the iterator, so `lines` is `mut`.
+
+In `parse_field()`, `text.parse().map(Some)` parses the text and, if that worked, wraps the number in `Some`, turning a `Result<f64, _>` into a `Result<Option<f64>, _>`. This `map()` is `Result`'s own, like `map_err()` (@sec-errors) but for the `Ok` value. The variant `Some` can be passed to `map()` like a function, because a variant that holds a value is one. Then `filter_map()` drops the `None`s, as in @sec-collections. R gets the same answers from `sum(is.na(airquality$Ozone))`, 37, and `mean(airquality$Ozone, na.rm = TRUE)`, 42.12931.
+
+The header shows why hand-splitting only goes so far: `write.csv()` put quotes around the column names. A field with a comma inside quotes, such as `"New York, NY"`, would break `split(',')` entirely. Handling quoting, escaped quotes, and line breaks inside fields correctly is what a CSV parser is for.
+
+## Reading CSV files with `csv`
+
+R's `read.csv()` returns a data frame with a column for each field:
+
+```{r}
+#| label: r-read-csv
+aq <- read.csv("data/airquality.csv")
+str(aq)
+```
+
+The `csv` crate reads a file record by record. Without `serde`, each record is a `StringRecord`, a row of text fields:
+
+```{rust}
+#| label: rust-csv-records
+#| cargo: true
+#| filename: src/main.rs
+use std::error::Error;
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path("data/airquality.csv")?;
+    println!("{:?}", reader.headers()?);
+    for result in reader.records().take(2) {
+        let record = result?;
+        println!("{:?}", record);
+    }
+    Ok(())
+}
+```
+
+The reader treats the first line as a header and removes the quotes around the names. It's `mut` because reading the header or a record moves it forward through the file. The name `csv::Reader` is a path into the crate, the way `std::fs` is a path into the standard library; a crate listed in `Cargo.toml` can be used by name with no `use` line (@sec-crates).
+
+With `serde`, the reader can turn each record into a struct instead. The attribute `#[derive(Deserialize)]` writes the code that fills in the struct from a record, and `#[serde(rename = "...")]` matches a field to a column whose name differs from it. A first attempt stops partway through the file:
+
+```{rust}
+#| label: rust-csv-serde-error
+#| cargo: true
+#| filename: src/main.rs
+#| error: true
+use serde::Deserialize;
+use std::error::Error;
+
+#[derive(Debug, Deserialize)]
+struct Day {
+    #[serde(rename = "Ozone")]
+    ozone: Option<f64>,
+    #[serde(rename = "Temp")]
+    temp: f64,
+    #[serde(rename = "Month")]
+    month: u32,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path("data/airquality.csv")?;
+    for result in reader.deserialize() {
+        let day: Day = result?;
+        println!("{:?}", day);
+    }
+    Ok(())
+}
+```
+
+The struct lists only the columns it needs; the reader skips the others. Like `parse()` and `collect()`, `deserialize()` needs to know what type to build, which `let day: Day` tells it. The first four rows come through, and the fifth, whose ozone reading is `NA`, stops the program. The `csv` crate reads an empty field into an `Option<f64>` as `None`, and `NA` is neither empty nor a number. The crate also provides a fix, `csv::invalid_option`, which turns any field that fails to parse into `None`:
+
+```{rust}
+#| label: rust-csv-serde
+#| cargo: true
+#| filename: src/main.rs
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::error::Error;
+
+#[derive(Debug, Deserialize)]
+struct Day {
+    #[serde(rename = "Ozone", deserialize_with = "csv::invalid_option")]
+    ozone: Option<f64>,
+    #[serde(rename = "Temp")]
+    temp: f64,
+    #[serde(rename = "Month")]
+    month: u32,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path("data/airquality.csv")?;
+    let mut days: Vec<Day> = Vec::new();
+    for result in reader.deserialize() {
+        days.push(result?);
+    }
+    println!("{} days", days.len());
+    println!("{:?}", days[4]); // the row whose NA stopped the program above
+
+    let mut temps: BTreeMap<u32, Vec<f64>> = BTreeMap::new();
+    for day in &days {
+        temps.entry(day.month).or_default().push(day.temp);
+    }
+    for (month, t) in &temps {
+        println!("{month}: {:.2}", t.iter().sum::<f64>() / t.len() as f64);
+    }
+    Ok(())
+}
+```
+
+With `invalid_option`, a stray word in the `Ozone` column would become `None` too, where `read.csv()` treats only `NA` as missing by default. The grouping is the one from @sec-collections. R's version is a single line:
+
+```{r}
+#| label: r-tapply-temp
+tapply(aq$Temp, aq$Month, mean)
+```
+
+::: {.callout-note title="An R habit to drop in Rust"}
+R's `read.csv()` decides each column's type by looking at the data, so a column of numbers with one stray word in it quietly becomes a character column. In Rust, the struct states each column's type, and a value that doesn't fit is an error that names the record and field, as the failed run above did. Deciding what a malformed value should become, such as `invalid_option`'s `None`, is an explicit choice in the code.
+:::
+
+## Writing files
+
+R's `write.csv()` writes a whole data frame, and Rust's `csv::Writer` writes records one at a time. Here both write the monthly mean temperatures to a temporary file and read the file back:
+
+```{r}
+#| label: r-write-csv
+monthly <- data.frame(
+  month = 5:9,
+  mean_temp = round(tapply(aq$Temp, aq$Month, mean), 1)
+)
+path <- tempfile(fileext = ".csv")
+write.csv(monthly, path, row.names = FALSE)
+cat(readLines(path), sep = "\n")
+```
+
+```{rust}
+#| label: rust-write-csv
+#| cargo: true
+#| filename: src/main.rs
+# use serde::Deserialize;
+# use std::collections::BTreeMap;
+use std::error::Error;
+use std::fs;
+#
+# #[derive(Deserialize)]
+# struct Day {
+#     #[serde(rename = "Temp")]
+#     temp: f64,
+#     #[serde(rename = "Month")]
+#     month: u32,
+# }
+
+fn main() -> Result<(), Box<dyn Error>> {
+#     let mut reader = csv::Reader::from_path("data/airquality.csv")?;
+#     let mut temps: BTreeMap<u32, Vec<f64>> = BTreeMap::new();
+#     for result in reader.deserialize() {
+#         let day: Day = result?;
+#         temps.entry(day.month).or_default().push(day.temp);
+#     }
+    // `temps` maps each month to its temperatures, as above
+    let path = std::env::temp_dir().join("monthly.csv");
+    let mut writer = csv::Writer::from_path(&path)?;
+    writer.write_record(vec!["month", "mean_temp"])?;
+    for (month, t) in &temps {
+        let mean = t.iter().sum::<f64>() / t.len() as f64;
+        writer.write_record(vec![month.to_string(), format!("{mean:.1}")])?;
+    }
+    writer.flush()?;
+
+    print!("{}", fs::read_to_string(&path)?);
+    Ok(())
+}
+```
+
+The function `std::env::temp_dir()` returns the system's temporary directory, like R's `tempdir()`, and `join()` adds a file name to it, as `file.path()` does in R. Unlike `tempfile()`, which makes up a unique name, the Rust program uses a fixed one in a directory that other programs share, so two copies running at once would write the same file.
+
+Each call to `write_record()` takes the fields of one row, and the writer adds quotes only where a field needs them, which is why the Rust file has none and R's has quotes around every name. The August mean differs too: R writes the rounded number as `84`, while `{:.1}` always writes one decimal, `84.0`. Calling `flush()` makes sure everything buffered has been written before the file is read back. The program then prints the file with `print!`, which is `println!` without the newline, since the file already ends with one. With `serde`, a struct that derives `Serialize` can be written whole with `writer.serialize()`, the mirror image of reading with `deserialize()`. For a whole text file, `fs::write(path, text)` is the counterpart of `writeLines()`.
+
+::: {.callout-note title="Package developer notes: data files that ship with the code" collapse="true"}
+An R package installs files it needs at runtime from `inst/extdata` and finds them with `system.file()` [@r-exts, sec. 1.1.6]. A standalone Rust program has no installed package directory to search, so it either takes a path, as the examples here do, or compiles the file into itself: `include_str!("../data/airquality.csv")` is a macro (@sec-macros) that reads the file when the program is compiled and puts its contents into the program as a `&str`, so the program never has to find it at runtime. The path is relative to the source file that contains the macro.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `readLines(path)` | `fs::read_to_string(path)?` and `.lines()` |
+| `writeLines(text, path)` | `fs::write(path, text)?` |
+| `head(lines, 3)` | `.take(3)` |
+| `file()` and `readLines(con, n = 1)` | `BufReader::new(File::open(path)?).lines()` |
+| `any(x == "NA")` | `.any()`, which stops at the first match |
+| The first line, then the rest | `lines.next()`, then a loop over `lines` |
+| `close(con)` | Dropped automatically |
+| An error message to inspect | `io::Error` with a `kind()` to match on |
+| `read.csv()` guesses column types | `serde` structs declare them |
+| `NA` in a CSV | `Option<f64>`; `csv::invalid_option` makes any unparsable field `None` |
+| `write.csv(df, path)` | `csv::Writer` and `write_record()` |
+| `tempdir()`, `file.path()` | `std::env::temp_dir().join()` |
+| `system.file("extdata", ...)` | A path, or `include_str!` at compile time |

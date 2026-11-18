@@ -1,0 +1,107 @@
+project:
+  type: book
+  render:
+    - "*.qmd"
+
+book:
+  title: "Rust for R Programmers"
+  subtitle: "Oxidizing Your R Toolkit"
+  author: "Brandon M. Greenwell"
+  date: today
+  # A download button in the HTML sidebar that links to the PDF
+  downloads: [pdf]
+  # A GitHub icon in the sidebar, and source, edit, and issue links below the
+  # table of contents on each page
+  repo-url: https://github.com/bgreenwell/rust4r
+  repo-branch: main
+  repo-actions: [source, edit, issue]
+  chapters:
+    - index.qmd
+    - part: "Foundations"
+      chapters:
+        - 01-why-rust.qmd
+        - 02-setup.qmd
+        - 03-vectors.qmd
+        - 04-types.qmd
+        - 05-strings.qmd
+        - 06-missingness.qmd
+    - part: "Objects and dispatch"
+      chapters:
+        - 07-structs.qmd
+        - 08-s3-traits.qmd
+        - 09-display.qmd
+        - 10-s4.qmd
+        - 11-operators.qmd
+        - 12-multiple-dispatch.qmd
+        - 13-generics.qmd
+        - 14-enums.qmd
+        - 15-s7.qmd
+    - part: "Memory and mutation"
+      chapters:
+        - 16-ownership.qmd
+        - 17-borrowing.qmd
+        - 18-environments.qmd
+        - 19-drop.qmd
+    - part: "Functions, errors, and macros"
+      chapters:
+        - 20-iterators.qmd
+        - 21-closures.qmd
+        - 22-errors.qmd
+        - 23-macros.qmd
+    - part: "Building Rust programs"
+      chapters:
+        - 24-collections.qmd
+        - 25-io.qmd
+        - 26-crates.qmd
+        - 27-cli.qmd
+        - 28-concurrency.qmd
+        - 29-capstone.qmd
+    - 30-extending-r.qmd
+    - references.qmd
+  appendices:
+    - a-running-class.qmd
+    - b-toolchain.qmd
+    - c-concept-map.qmd
+    - d-agents.qmd
+
+bibliography: references.bib
+# Pinned copy of Pandoc's default style (Chicago 18th ed., author-date), so a
+# Pandoc update can't change how citations look
+csl: chicago-author-date.csl
+
+# One labeled code block per chunk; see the comments in the filter
+filters:
+  - path: filters/code-labels.lua
+    at: pre-ast
+  # PDF: keep short tables with their heading and lead-in
+  - filters/keep-tables.lua
+
+execute:
+  freeze: auto
+
+format:
+  html:
+    theme:
+      - cosmo
+      - brand
+    css: styles.css
+  pdf:
+    documentclass: scrreprt
+    # \codelabel: the language label filters/code-labels.lua puts above each
+    # code chunk. \needspace starts a new page unless the label and the first
+    # few lines of code fit on this one; \nopagebreak alone doesn't stop
+    # the shaded code box from breaking away from it.
+    # fvextra: wrap long lines in code output (e.g. compiler messages) instead
+    # of letting them run off the page, and wrap source lines that are too long
+    # at a space (\fvset applies to the highlighted code blocks too). Deferred
+    # to \begin{document} because a package Quarto loads later in the preamble
+    # resets `verbatim`.
+    # \mainmatter: the CRC build (_quarto-crc.yml) needs it at the end of the
+    # preface; scrreprt has no such command, so it does nothing here.
+    include-in-header:
+      text: |
+        \usepackage{needspace}
+        \newcommand{\codelabel}[1]{\par\addvspace{\medskipamount}\needspace{8\baselineskip}\noindent{\small\sffamily\bfseries #1}\par\nopagebreak\vspace{-0.6\baselineskip}}
+        \usepackage{fvextra}
+        \AtBeginDocument{\RecustomVerbatimEnvironment{verbatim}{Verbatim}{breaklines,breakanywhere}\fvset{breaklines}}
+        \providecommand{\mainmatter}{}

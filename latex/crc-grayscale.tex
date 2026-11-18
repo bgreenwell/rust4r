@@ -1,0 +1,19 @@
+% Callout colors for black-and-white printing, used only by the CRC build
+% (_quarto-crc.yml). Quarto's colored borders and icons turn into pale grays
+% in print; these darker grays keep the boxes crisp. The title bars are a 10%
+% tint of the icon color, so they stay light. Deferred to \begin{document}
+% so they replace Quarto's definitions, which come later in the preamble.
+\AtBeginDocument{%
+  \definecolor{quarto-callout-color-frame}{gray}{0.40}%
+  \definecolor{quarto-callout-color}{gray}{0.25}%
+  \definecolor{quarto-callout-note-color-frame}{gray}{0.40}%
+  \definecolor{quarto-callout-note-color}{gray}{0.25}%
+  \definecolor{quarto-callout-tip-color-frame}{gray}{0.40}%
+  \definecolor{quarto-callout-tip-color}{gray}{0.25}%
+  \definecolor{quarto-callout-warning-color-frame}{gray}{0.40}%
+  \definecolor{quarto-callout-warning-color}{gray}{0.25}%
+  \definecolor{quarto-callout-important-color-frame}{gray}{0.40}%
+  \definecolor{quarto-callout-important-color}{gray}{0.25}%
+  \definecolor{quarto-callout-caution-color-frame}{gray}{0.40}%
+  \definecolor{quarto-callout-caution-color}{gray}{0.25}%
+}

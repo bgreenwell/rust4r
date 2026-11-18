@@ -1,0 +1,16 @@
+name: Suggestion
+description: A topic an R programmer would need, an analogy that would work better, or another idea for the book.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your suggestion
+      description: What you'd like to see, and why it would help an R programmer learning Rust.
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Where it would go
+      description: The chapter or section it belongs in, if you have one in mind.

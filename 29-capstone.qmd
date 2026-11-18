@@ -1,0 +1,522 @@
+# Capstone: `rsummary` {#sec-capstone}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+This chapter builds `rsummary`, a command-line tool that reads a CSV file and prints what R's `summary()` and `table()` print for it, digit for digit. It draws on most of the book. Part I supplies `Option` and slices, Part II the running class, and Part III borrowing; Part IV adds iterators, closures, and errors, and this part collections, CSV reading, `clap`, modules, and tests. The data is the `airquality` file from @sec-io. The program is about 330 lines in four files, short enough to read in full, and every line of it is shown below. The Rust book's own project chapter, "An I/O Project: Building a Command Line Program", builds a smaller tool of the same kind [@rustbook, chap. 12].
+
+## R's `summary()` and `table()`
+
+In R, `summary()` of a numeric vector reports its minimum, quartiles, mean, maximum, and number of missing values, and `lapply()` applies it to every column of a data frame:
+
+```{r}
+#| label: r-summaries
+aq <- read.csv("data/airquality.csv")
+lapply(aq, summary)
+```
+
+Two details are worth copying exactly. The quartiles are R's default quantile, type 7 of the nine that `quantile()` offers [@hyndman1996]. And the number of decimal places differs from column to column: `print()` formats each summary with four significant digits, which takes two decimals for `Ozone`, whose mean is 42.13, but three for `Wind`, whose mean is 9.958. The six statistics in a summary get the same number of decimals, the most that any of them needs, and the count of `NA's` is a whole number.
+
+R's `table()` counts each distinct value:
+
+```{r}
+#| label: r-table-month
+table(aq$Month)
+```
+
+The tool will also fit a normal distribution to each column, the running class's job. For each column, it reports the share of values within one standard deviation of the mean, which is about 68% for data that really are normal:
+
+```{r}
+#| label: r-normal-fit
+fits <- sapply(aq, function(x) {
+  x <- x[!is.na(x)]
+  c(mean = mean(x), sd = sd(x),
+    within = 100 * mean(abs(x - mean(x)) <= sd(x)))
+})
+round(fits, 2)
+```
+
+## The plan
+
+The crate has four modules, each in its own file (@sec-crates):
+
+| File | What it does | Built on |
+|----------------------|------------------------------|--------------|
+| `src/distributions.rs` | The `Distribution` trait and `Normal` | Part II |
+| `src/stats.rs` | Quantiles, summaries, and counts, with tests | @sec-iterators, @sec-collections |
+| `src/report.rs` | Formatting numbers and columns the way R does | @sec-display |
+| `src/main.rs` | Arguments, reading the file, and choosing a report | @sec-io, @sec-cli |
+
+## The distributions module
+
+The file `src/distributions.rs` holds the trait and the `Normal` half of the running class from @sec-s7, with private fields and a validating `new()`, and one change to `Display`. The capstone has no use for `Uniform` or `+`:
+
+```{rust}
+#| label: rust-capstone-distributions
+#| write: src/distributions.rs
+use std::fmt;
+
+pub trait Distribution {
+    fn mean(&self) -> f64;
+    fn variance(&self) -> f64;
+
+    fn std_dev(&self) -> f64 {
+        self.variance().sqrt()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl Normal {
+    pub fn new(mean: f64, sd: f64) -> Result<Normal, String> {
+        if sd > 0.0 {
+            Ok(Normal { mean, sd })
+        } else {
+            Err(format!("sd must be positive, not {sd}"))
+        }
+    }
+}
+
+impl Distribution for Normal {
+    fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    fn variance(&self) -> f64 {
+        self.sd * self.sd
+    }
+}
+
+// `{:.2}` sets the decimal places for both parameters
+impl fmt::Display for Normal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match f.precision() {
+            Some(p) => write!(
+                f,
+                "Normal(mean = {:.*}, sd = {:.*})",
+                p, self.mean, p, self.sd
+            ),
+            None => {
+                write!(f, "Normal(mean = {}, sd = {})", self.mean, self.sd)
+            }
+        }
+    }
+}
+```
+
+The call `f.precision()` returns the precision a caller asked for, as an `Option`: `Some(2)` for `{:.2}`, `None` for plain `{}`. Passing it on with `{:.*}`, which takes the precision from the argument before the value (@sec-cli), makes `format!("{dist:.2}")` round both parameters to two decimals.
+
+## Statistics
+
+The module `src/stats.rs` computes the numbers. It works on a column as a slice of `Option<f64>`, with `None` for each `NA` (@sec-missingness):
+
+```{rust}
+#| label: rust-capstone-stats
+#| write: src/stats.rs
+/// The numbers `summary()` reports for a numeric vector.
+pub struct Summary {
+    pub min: f64,
+    pub q1: f64,
+    pub median: f64,
+    pub mean: f64,
+    pub q3: f64,
+    pub max: f64,
+    pub missing: usize,
+}
+
+/// Summarizes a column, or returns `None` if every value is missing.
+pub fn summarize(column: &[Option<f64>]) -> Option<Summary> {
+    // x[!is.na(x)] in R: flatten() skips the Nones
+    let mut values: Vec<f64> = column.iter().flatten().copied().collect();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    Some(Summary {
+        min: values[0],
+        q1: quantile(&values, 0.25),
+        median: quantile(&values, 0.5),
+        mean: mean(&values),
+        q3: quantile(&values, 0.75),
+        max: values[values.len() - 1],
+        missing: column.len() - values.len(), // the skipped Nones
+    })
+}
+
+/// R's default quantile (type 7) of values sorted in increasing order.
+/// Panics if `sorted` is empty.
+pub fn quantile(sorted: &[f64], p: f64) -> f64 {
+    let h = (sorted.len() - 1) as f64 * p;
+    let lo = h.floor() as usize;
+    let hi = h.ceil() as usize;
+    sorted[lo] + (h - lo as f64) * (sorted[hi] - sorted[lo])
+}
+
+/// The mean, or `NaN` for an empty slice, as `mean(numeric(0))` is in R.
+pub fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+/// The sample standard deviation, as `sd()` computes it, or `NaN` for
+/// fewer than two values, where `sd()` returns `NA`.
+pub fn sd(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return f64::NAN;
+    }
+    let m = mean(values);
+    let ss: f64 = values.iter().map(|x| (x - m) * (x - m)).sum();
+    (ss / (values.len() - 1) as f64).sqrt()
+}
+
+/// Counts each distinct value, in increasing order, as `table()` does.
+pub fn table(column: &[Option<f64>]) -> Vec<(f64, usize)> {
+    let mut values: Vec<f64> = column.iter().flatten().copied().collect();
+    values.sort_by(f64::total_cmp);
+    let mut counts: Vec<(f64, usize)> = Vec::new();
+    // After sorting, equal values sit together, so each value either adds
+    // to the last count or starts a new one
+    for x in values {
+        match counts.last_mut() {
+            Some((value, n)) if *value == x => *n += 1,
+            _ => counts.push((x, 1)),
+        }
+    }
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantiles_match_r() {
+        // quantile(c(1, 2, 3, 4)) in R: 1.00 1.75 2.50 3.25 4.00
+        let x = vec![1.0, 2.0, 3.0, 4.0];
+        assert_eq!(quantile(&x, 0.25), 1.75);
+        assert_eq!(quantile(&x, 0.5), 2.5);
+        assert_eq!(quantile(&x, 0.75), 3.25);
+    }
+
+    #[test]
+    fn missing_values_are_counted() {
+        // summary(c(3, NA, 1)) in R: median 2, and 1 NA
+        let column = vec![Some(3.0), None, Some(1.0)];
+        let s = summarize(&column).unwrap();
+        assert_eq!(s.missing, 1);
+        assert_eq!(s.median, 2.0);
+    }
+
+    #[test]
+    fn table_counts_in_order() {
+        // table(c(6, 5, NA, 6)) in R: one 5 and two 6s
+        let column = vec![Some(6.0), Some(5.0), None, Some(6.0)];
+        assert_eq!(table(&column), vec![(5.0, 1), (6.0, 2)]);
+    }
+
+    #[test]
+    fn sd_needs_two_values() {
+        // sd(5) in R is NA
+        assert!(sd(&[5.0]).is_nan());
+    }
+}
+```
+
+A few pieces are new:
+
+- `column.iter().flatten()` keeps the values inside the `Some`s and skips the `None`s, because an `Option` counts as a collection of zero or one items. Combined with `copied()` and `collect()`, it's R's `x[!is.na(x)]`.
+- `values.sort_by(f64::total_cmp)` sorts the numbers. Plain `sort()` doesn't compile for `f64`, for the same reason `max()` didn't in @sec-iterators: `NaN` has no place in the usual order. The function `total_cmp` is a complete order that places `NaN` beyond the infinities, and `sort_by()` takes it as a function, as `map(f64::sqrt)` did in @sec-closures.
+- `quantile()` implements type 7. For `n` sorted values, the quantile for `p` lies at position `h = (n - 1) * p`, counting from zero, and is interpolated between the values on either side of it.
+- `table()` counts by walking the sorted values. Calling `counts.last_mut()` returns a mutable reference to the last `(value, count)` pair, if there is one, and the pattern `Some((value, n))` makes `value` and `n` references into it, which is why the arm writes `*value` and `*n`. The first arm matches when that count is for the same value: the `if` after the pattern is a *guard*, a condition the arm must also meet. Otherwise the second arm starts a new count. Sorting first puts equal values next to each other and the counts in the order `table()` uses.
+- `sd()` returns `NaN` for fewer than two values, as R's `sd(5)` returns `NA`. Without the check, it would divide by zero, or, for an empty slice, subtract 1 from a length of 0, which panics in a debug build.
+- The tests compare `quantile()` with R's `quantile(c(1, 2, 3, 4))`, check that missing values are counted and skipped, and check that `sd()` of one value is `NaN`.
+
+Running the tests needs a `src/main.rs`, so they run below, once the program is complete.
+
+## Printing like R
+
+The file `src/report.rs` reproduces R's layout:
+
+```{rust}
+#| label: rust-capstone-report
+#| write: src/report.rs
+use crate::stats::Summary;
+
+/// The decimal places R's `format(x, digits = 4)` would use: enough to show
+/// each value to 4 significant digits, without trailing zeros.
+fn decimals(values: &[f64], digits: i32) -> usize {
+    let mut most = 0;
+    for &x in values {
+        // 0, NaN, and inf print with no decimals; log10(0) is -inf
+        if x == 0.0 || !x.is_finite() {
+            continue;
+        }
+        // 42.13 has magnitude 1, so 4 digits take 4 - 1 - 1 = 2 places
+        let magnitude = x.abs().log10().floor() as i32;
+        let places = (digits - 1 - magnitude).max(0) as usize;
+        let text = format!("{x:.places$}");
+        let shown = match text.split_once('.') {
+            Some((_, fraction)) => fraction.trim_end_matches('0').len(),
+            None => 0,
+        };
+        most = most.max(shown);
+    }
+    most
+}
+
+/// Prints names over values, right-aligned in columns of one width, as R
+/// prints a named vector.
+fn print_columns(names: &[String], values: &[String]) {
+    let width = names
+        .iter()
+        .chain(values)
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(0);
+    let line = |cells: &[String]| -> String {
+        cells.iter().map(|s| format!("{s:>width$} ")).collect()
+    };
+    println!("{}", line(names));
+    println!("{}", line(values));
+}
+
+pub fn print_summary(name: &str, s: &Summary) {
+    let numbers = vec![s.min, s.q1, s.median, s.mean, s.q3, s.max];
+    let places = decimals(&numbers, 4);
+    let mut names: Vec<String> =
+        vec!["Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."]
+            .into_iter()
+            .map(String::from)
+            .collect();
+    let mut values: Vec<String> =
+        numbers.iter().map(|x| format!("{x:.places$}")).collect();
+    // summary() adds an NA's column only when there are missing values
+    if s.missing > 0 {
+        names.push(String::from("NA's"));
+        values.push(s.missing.to_string());
+    }
+    println!("${name}"); // the label lapply() prints above each summary
+    print_columns(&names, &values);
+    println!();
+}
+
+pub fn print_table(counts: &[(f64, usize)]) {
+    let names: Vec<String> =
+        counts.iter().map(|(value, _)| value.to_string()).collect();
+    let values: Vec<String> =
+        counts.iter().map(|(_, n)| n.to_string()).collect();
+    // table(aq$Month) starts with its dimension's name, which is empty
+    println!();
+    print_columns(&names, &values);
+}
+```
+
+The function `decimals()` follows R's rule for `format(x, digits = 4)`. For each value, it works out how many decimals four significant digits would take, from the value's order of magnitude, formats the value with that many, and counts the decimals that remain after dropping trailing zeros. The largest count wins. Within it, `split_once('.')` splits the text at the decimal point, returning `None` if there isn't one, and `trim_end_matches('0')` drops the trailing zeros. The loop header `for &x in values` takes each `&f64` apart as it arrives, so `x` is the `f64` itself.
+
+Two format specifications take their settings from variables rather than the fixed numbers of @sec-display. A name followed by `$` stands for a variable, so `{x:.places$}` formats `x` with `places` decimals, and `{s:>width$}` right-aligns `s` in a field `width` characters wide. The function `print_columns()` computes one width for every cell, names and values together, using `chain()` to go through `names` and then `values` as one iterator, and prints each cell followed by a space, as R does when it prints a named vector. The closure `line` builds one row of output; it borrows `width` from the function around it (@sec-closures), and its `-> String` return type tells `collect()` to join the cells into one `String`.
+
+The line `use crate::stats::Summary;` is a path from the root of the crate (@sec-crates), because `Summary` is defined in a sibling module.
+
+## The program
+
+Finally, `src/main.rs` declares the modules, defines the arguments with `clap` (@sec-cli), reads the file, and picks a report:
+
+```{rust}
+#| label: rust-capstone-main
+#| cargo: true
+#| filename: src/main.rs
+#| bin: rsummary
+#| args: [data/airquality.csv]
+mod distributions;
+mod report;
+mod stats;
+
+use clap::Parser;
+use distributions::{Distribution, Normal};
+use std::error::Error;
+
+/// Summarize the numeric columns of a CSV file, as R's summary() does
+#[derive(Parser)]
+struct Args {
+    /// The CSV file to read
+    file: String,
+
+    /// Count the values in this column, as table() does
+    #[arg(short, long)]
+    table: Option<String>,
+
+    /// Fit a normal distribution to each column
+    #[arg(short, long)]
+    normal: bool,
+}
+
+struct Column {
+    name: String,
+    values: Vec<Option<f64>>,
+}
+
+/// Reads a CSV file into columns of numbers, with `NA` or an empty field as
+/// `None`. Any other field that isn't a number is an error.
+fn read_columns(path: &str) -> Result<Vec<Column>, Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path(path)?;
+    // One empty column per header; the records below fill them in
+    let mut columns: Vec<Column> = reader
+        .headers()?
+        .iter()
+        .map(|name| Column {
+            name: name.to_string(),
+            values: Vec::new(),
+        })
+        .collect();
+
+    for result in reader.records() {
+        let record = result?;
+        for (column, field) in columns.iter_mut().zip(record.iter()) {
+            // In a numeric column, read.csv() reads NA and "" as NA
+            let value = if field == "NA" || field.is_empty() {
+                None
+            } else {
+                let x: f64 = field.parse().map_err(|_| {
+                    format!(
+                        "column {}: {field:?} is not a number",
+                        column.name
+                    )
+                })?;
+                Some(x)
+            };
+            column.values.push(value);
+        }
+    }
+    Ok(columns)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    let columns = read_columns(&args.file)?;
+
+    if let Some(name) = &args.table {
+        let column = columns
+            .iter()
+            .find(|c| &c.name == name)
+            .ok_or(format!("no column named {name}"))?;
+        report::print_table(&stats::table(&column.values));
+    } else if args.normal {
+        for column in &columns {
+            let values: Vec<f64> =
+                column.values.iter().flatten().copied().collect();
+            // With fewer than two values, sd() is NaN, and Normal::new()
+            // would return an error that ends the program
+            if values.len() < 2 {
+                continue;
+            }
+            let dist =
+                Normal::new(stats::mean(&values), stats::sd(&values))?;
+            // R's mean(abs(x - mean(x)) <= sd(x)), as a count
+            let within = values
+                .iter()
+                .copied()
+                .filter(|x| (x - dist.mean()).abs() <= dist.std_dev())
+                .count();
+            let percent = 100.0 * within as f64 / values.len() as f64;
+            println!(
+                "{:<8} {dist:.2}, {percent:.0}% within 1 sd",
+                column.name
+            );
+        }
+    } else {
+        for column in &columns {
+            if let Some(summary) = stats::summarize(&column.values) {
+                report::print_summary(&column.name, &summary);
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+The output matches `lapply(aq, summary)` above, digit for digit and space for space.
+
+The function `read_columns()` stores each CSV column as a `Column` with a `Vec` of its own, the column-oriented layout that @sec-collections described. For each record, `columns.iter_mut().zip(record.iter())` pairs each column, borrowed mutably so that a value can be pushed onto it, with that record's field. Fields that are `NA` or empty become `None`, numbers become `Some`, and anything else stops the program with an error that names the column. A field that reads `NaN` parses as a number, though, so it would become `Some(NaN)` and make the column's mean `NaN`, where R's `summary()` counts it among the `NA's`.
+
+Then `main()` chooses a report from the arguments. The pattern `if let Some(name) = &args.table` borrows the column name instead of moving it out of `args`, so `name` is a `&String`. The call `find()` returns the first column for which its closure is true, as an `Option`, the way `position()` returned an index in @sec-cli, and the closure compares `&c.name` with `name` so that both sides are references. With `--normal`, a column with fewer than two values is skipped, as `summarize()` skips one with none.
+
+Passing `--table Month` or `--normal` prints the other two reports:
+
+```{rust}
+#| label: rust-capstone-table
+#| cargo: rerun
+#| bin: rsummary
+#| echo: false
+#| args: [data/airquality.csv, --table, Month]
+// run again with --table Month
+```
+
+```{rust}
+#| label: rust-capstone-normal
+#| cargo: rerun
+#| bin: rsummary
+#| echo: false
+#| args: [data/airquality.csv, --normal]
+// run again with --normal
+```
+
+The normal fits agree with `fits` from R. A normal distribution puts about 68% of its values within one standard deviation of the mean. A uniform distribution, the other half of the running class, puts $2/\sqrt{12}$, about 58%, there. The `Day` column, which runs evenly from 1 to 31, comes in at 59%, close to the uniform figure, while `Temp` and `Wind`, at 67% and 65%, are close to the normal one. The check is crude, though: `Ozone` is strongly skewed and still lands at 72%.
+
+Asking for a column that doesn't exist ends with the error from `ok_or()` and a status of 1:
+
+```{rust}
+#| label: rust-capstone-error
+#| cargo: rerun
+#| bin: rsummary
+#| echo: false
+#| error: true
+#| args: [data/airquality.csv, --table, Ozne]
+// run again with a misspelled column
+```
+
+## Tests
+
+With `src/main.rs` in place, `cargo test` runs the tests in `src/stats.rs`:
+
+```{rust}
+#| label: rust-capstone-test
+#| cargo: test
+#| echo: false
+// test the project as it stands
+```
+
+Test names include their module path, `stats::tests`, because the tests live in `src/stats.rs`. Running `cargo clippy` reports nothing for this crate. The code is formatted with `cargo fmt`, set to a 77-character line width so that it fits on a printed page.
+
+## When the Rust version is worth the extra code
+
+The R side of this chapter is a few lines, and the Rust side is a crate. For a one-off analysis, R is the better tool, and nothing here argues otherwise. The Rust version earns its length when the program has to run where R isn't installed, start instantly, or be used by people who will never read the code: it's one executable, its arguments are checked and documented by `clap`, and its errors name the problem. Those are reasons to write `rsummary`, not reasons to stop using `summary()`.
+
+## Extending `rsummary`
+
+The tool handles numeric columns only, and it summarizes them one at a time. Here are a few directions to extend it, each using a chapter of the book:
+
+- Summarize text columns the way `summary()` summarizes a factor, with counts of each level, using the counting from @sec-collections.
+- Read large files without holding every row, by updating each column's count, mean, and variance as rows arrive with Welford's method from @sec-environments. Quantiles need all the values, or an approximation.
+- Summarize the columns in parallel with `rayon` (@sec-concurrency); `collect()` keeps them in order.
+- Print the side-by-side layout of `summary(aq)` instead of `lapply()`'s.
+
+The last chapter takes the crate in a different direction: it turns the statistics into functions that R itself can call (@sec-extending-r).
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `x[!is.na(x)]` | `x.iter().flatten().copied().collect()` |
+| `sort(x)` for doubles | `v.sort_by(f64::total_cmp)` |
+| `quantile(x, p)`, type 7 | Interpolation at position `(n - 1) * p` |
+| `sd()` of one value is `NA` | `sd()` returns `NaN` for fewer than two values |
+| `sprintf("%.*f", places, x)` | `format!("{x:.places$}")` |
+| `c(a, b)` to go through both | `a.iter().chain(b)` |
+| An `if` inside a `switch()` branch | A match guard, `Some(x) if x == y =>` |
+| `summary()` and `table()` at the console | `rsummary`, a single executable |

@@ -1,0 +1,276 @@
+# Factors and `switch()` to enums and `match` {#sec-enums}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+A factor stores values that come from a fixed set of levels, and `switch()` picks code according to which value it's given. Rust combines both ideas in one feature. An enum is a type whose values come from a fixed list of *variants*, and `match` runs different code for each variant. The compiler knows the full list, so it rejects a value that isn't on it and a `match` that leaves one out. Variants can also carry data, which makes an enum a second way, besides a trait, to represent several kinds of distribution. The matching material in the Rust book is "Enums and Pattern Matching", with more on patterns in "Patterns and Matching" [@rustbook, chaps. 6, 19].
+
+## Factors and enums
+
+A factor records each value as one of its levels:
+
+```{r}
+#| label: r-factor
+severity <- factor(c("low", "high", "low"),
+                   levels = c("low", "medium", "high"))
+severity
+levels(severity)
+as.integer(severity)
+```
+
+A Rust enum lists its variants, and each value is one of them:
+
+```{rust}
+#| label: rust-enum
+#[derive(Debug)]
+enum Severity {
+    Low,
+    Medium,
+    High,
+}
+
+fn main() {
+    let readings = vec![Severity::Low, Severity::High, Severity::Low];
+    println!("{:?}", readings);
+}
+```
+
+A variant is written with the enum's name, `Severity::Low`, the same `::` used for `Normal::new()` in @sec-structs. The `#[derive(Debug)]` line works for enums as it does for structs.
+
+The difference shows up with a value that isn't on the list. R turns it into `NA`, without a warning:
+
+```{r}
+#| label: r-factor-bad-level
+factor("extreme", levels = c("low", "medium", "high"))
+```
+
+In Rust, `Severity::Extreme` is a compile error, because the enum has no such variant. That check covers names written in the code. Text that arrives while the program runs, such as a column read from a file, has to be converted to a `Severity` first, and the conversion decides what to do with an unknown label, such as returning `None`. Once a value is a `Severity`, though, it's always one of the three variants.
+
+::: {.callout-tip title="The same idea in R"}
+An ordered factor, created with `ordered = TRUE`, can be compared with `<` in the order of its levels. Adding `PartialEq` and `PartialOrd` to the `derive` list does the same for an enum like `Severity`, so `Severity::Low < Severity::High` is `true`, in the order the variants are declared. And just as `as.integer()` exposes a factor's codes, `Severity::High as i32` gives the variant's position, counting from zero: `2`. The cast works only for enums whose variants hold no data.
+:::
+
+## `switch()` and `match`
+
+In R, `switch()` chooses a value according to a string:
+
+```{r}
+#| label: r-switch
+weight <- function(level) {
+  switch(level, low = 1, medium = 2, high = 4)
+}
+
+weight("high")
+weight("extreme")
+is.null(weight("extreme"))
+```
+
+A string with no matching case falls through: `switch()` returns `NULL`, invisibly, so `weight("extreme")` prints nothing at all. The argument has to be a string, too. Given a factor, `switch()` warns and picks a case by the factor's integer code, not by name, so convert a factor's values with `as.character()` first.
+
+Rust's `match` must cover every variant, and leaving one out is a compile error:
+
+```{rust}
+#| label: rust-match-missing
+#| error: true
+enum Severity {
+    Low,
+    Medium,
+    High,
+}
+
+fn weight(level: Severity) -> f64 {
+    match level {
+        Severity::Low => 1.0,
+        Severity::Medium => 2.0,
+    }
+}
+
+fn main() {
+    println!("{}", weight(Severity::High));
+}
+```
+
+The error names the variant that isn't handled. Each arm of a `match` has a pattern, `=>`, and the value or block to use when the pattern fits. Like `if` in @sec-setup, a `match` is an expression, so its value is the value of the arm that ran.
+
+When several variants should be handled the same way, `_` matches anything not handled by an earlier arm:
+
+```{rust}
+#| label: rust-match-wildcard
+# enum Severity {
+#     Low,
+#     Medium,
+#     High,
+# }
+#
+fn weight(level: Severity) -> f64 {
+    match level {
+        Severity::High => 4.0,
+        _ => 1.0,
+    }
+}
+
+fn main() {
+    println!("{}", weight(Severity::High));
+    println!("{}", weight(Severity::Low));
+}
+```
+
+This is the same `_` that appeared in `print_type(_: T)` in @sec-types: a pattern that matches anything and ignores it. It's also the counterpart of the unnamed last argument of `switch()`, which supplies a default.
+
+::: {.callout-note title="An R habit to drop in Rust"}
+A `switch()` without a default quietly returns `NULL` for anything it doesn't recognize, so careful R code adds a final `stop()`. In Rust, prefer listing every variant over `_`. Then, if someone adds a variant later, every `match` that doesn't handle it becomes a compile error that points to the code needing an update. A `_` arm would silently take the new variant instead.
+:::
+
+## Variants with data
+
+A variant can hold values, like a struct. R has nothing built in for this. The closest R code keeps a tag in each object and switches on it:
+
+```{r}
+#| label: r-tagged-list
+dist_mean <- function(dist) {
+  switch(dist$family,
+    normal = dist$mean,
+    uniform = (dist$min + dist$max) / 2
+  )
+}
+dist_variance <- function(dist) {
+  switch(dist$family,
+    normal = dist$sd^2,
+    uniform = (dist$max - dist$min)^2 / 12
+  )
+}
+
+normal_dist <- list(family = "normal", mean = 0, sd = 2)
+uniform_dist <- list(family = "uniform", min = 0, max = 6)
+c(dist_mean(normal_dist), dist_variance(normal_dist))
+c(dist_mean(uniform_dist), dist_variance(uniform_dist))
+is.null(dist_mean(list(family = "exponential", rate = 2)))
+```
+
+Here's the running class as an enum, named `Dist` to keep it apart from the `Distribution` trait:
+
+```{rust}
+#| label: rust-enum-data
+#[derive(Debug, Clone, Copy)]
+enum Dist {
+    Normal { mean: f64, sd: f64 },
+    Uniform { min: f64, max: f64 },
+}
+
+fn mean(dist: Dist) -> f64 {
+    match dist {
+        Dist::Normal { mean, .. } => mean,
+        Dist::Uniform { min, max } => (min + max) / 2.0,
+    }
+}
+
+fn variance(dist: Dist) -> f64 {
+    match dist {
+        Dist::Normal { sd, .. } => sd * sd,
+        Dist::Uniform { min, max } => (max - min).powi(2) / 12.0,
+    }
+}
+
+fn main() {
+    let dists = vec![
+        Dist::Normal { mean: 0.0, sd: 2.0 },
+        Dist::Uniform { min: 0.0, max: 6.0 },
+    ];
+    for dist in dists {
+        println!(
+            "{:?}: mean {}, variance {}",
+            dist,
+            mean(dist),
+            variance(dist)
+        );
+    }
+}
+```
+
+A pattern such as `Dist::Normal { mean, .. }` matches a `Normal` and names its `mean` field for use in the arm; `..` ignores the rest. Because `Dist` is a single type, a plain `Vec<Dist>` holds both kinds of distribution, with no `Box` or `dyn` (@sec-generics). Deriving `Clone` and `Copy` lets `dist` be passed to both functions, as in @sec-operators.
+
+An enum is the R pattern with the tags checked. Add an `Exponential` variant to `Dist`, and both `mean()` and `variance()` stop compiling until they handle it. Add an `"exponential"` family in R, and `dist_mean()` returns `NULL` for it, as the last line of the R code shows.
+
+## Enums or traits
+
+The running class now exists in two forms: as types that implement the `Distribution` trait (@sec-s3-traits) and as variants of the `Dist` enum. The two forms differ in what a change costs:
+
+| | Trait with one type per distribution | Enum with one variant per distribution |
+|----------------|----------------------------|----------------------------|
+| Adding a distribution | Write a new type and its `impl`, anywhere, even in another crate | Add a variant, then update every `match` without a `_` arm |
+| Adding an operation | Add a method to the trait, then update every `impl`, unless the method has a default | Write one new function with a `match` |
+| The set of distributions | Open | Closed, listed in one place |
+| A collection of mixed distributions | `Vec<Box<dyn Distribution>>` | `Vec<Dist>` |
+| Closest R equivalent | S3 or S4 classes with methods | A `switch()` on a tag, or an S4 class union |
+
+An operation that needs only the trait's existing methods can also be a plain function, like `sum_moments()` in @sec-multiple-dispatch, with no change to the trait.
+
+S4's `setClassUnion()`, mentioned in @sec-s4, sits on the enum side: it gathers the classes that count as one into a single list. Unlike an enum's variants, that list can grow later.
+
+## `Option` is an enum
+
+@sec-missingness used `Option` with `if let` and `unwrap_or()`. It's an ordinary enum from the standard library, with two variants: `Some`, which holds a value, and `None`. Unlike `Severity`'s variants, they need no prefix, because Rust makes them available in every program [@rustbook, sec. 6.1]. A `match` handles both cases directly:
+
+```{rust}
+#| label: rust-match-option
+let reading: Option<f64> = None;
+let text = match reading {
+    Some(value) => format!("reading: {value}"),
+    None => String::from("no reading"),
+};
+println!("{text}");
+```
+
+In Rust, `if let` is shorthand for a `match` with one pattern: its block runs when the pattern matches, and an `else` block, if there is one, handles everything else. The `Result` type from @sec-s4 is an enum as well, with variants `Ok` and `Err`.
+
+## Matching on pairs
+
+@sec-multiple-dispatch promised a workaround for choosing code from the runtime types of two values. With an enum, `match` can take a pair of values, written `(a, b)`, and give an arm to each combination:
+
+```{rust}
+#| label: rust-match-pair
+# #[derive(Debug, Clone, Copy)]
+# enum Dist {
+#     Normal { mean: f64, sd: f64 },
+#     Uniform { min: f64, max: f64 },
+# }
+#
+fn add(a: Dist, b: Dist) -> Option<Dist> {
+    match (a, b) {
+        (
+            Dist::Normal { mean: m1, sd: s1 },
+            Dist::Normal { mean: m2, sd: s2 },
+        ) => Some(Dist::Normal {
+            mean: m1 + m2,
+            sd: (s1 * s1 + s2 * s2).sqrt(),
+        }),
+        _ => None,
+    }
+}
+
+fn main() {
+    let n = Dist::Normal { mean: 0.0, sd: 3.0 };
+    let u = Dist::Uniform { min: 0.0, max: 6.0 };
+    println!("{:?}", add(n, Dist::Normal { mean: 1.0, sd: 4.0 }));
+    println!("{:?}", add(n, u));
+}
+```
+
+The parentheses make a *tuple*, a fixed group of values that can have different types, and a tuple's type is written the same way, here `(Dist, Dist)` [@rustbook, sec. 3.2]. The patterns name the fields of both values: `mean: m1` binds the first normal's mean to `m1`. Every other pair falls to `_` and returns `None`, because their sum isn't one of the distributions in `Dist`. The choice is made at runtime, from the values themselves, so this works for elements of a `Vec<Dist>` whose kinds aren't known in advance, which is what S4's multiple dispatch does with classes.
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `factor(x, levels = ...)` | `enum Severity { Low, Medium, High }` |
+| An unknown level becomes `NA` | An unknown variant doesn't compile |
+| `ordered = TRUE` | `#[derive(PartialEq, PartialOrd)]` |
+| `as.integer(f)` | `Severity::High as i32` |
+| Without a default, `switch()` returns `NULL` when nothing matches | `match` must cover every variant |
+| The unnamed default of `switch()` | `_ =>` |
+| A list with a `family` tag | An enum variant with fields |
+| `setClassUnion()`, which can gain members later | An enum, whose variants are fixed |
+| Multiple dispatch on runtime classes | `match` on a pair of enum values |

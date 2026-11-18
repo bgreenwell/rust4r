@@ -1,0 +1,326 @@
+# From S3 to traits {#sec-s3-traits}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+S3 is the object system most R code uses. A class is a string stored in an attribute, a generic is usually a function that calls `UseMethod()`, and a method is a function whose name joins the generic and the class with a dot. Nothing is declared ahead of time, and R finds the right method only when the generic is called. Rust's counterpart is the trait: a named set of methods that a type promises to provide. You declare the trait, implement it for each type, and the compiler checks every implementation and every call. This chapter turns the normal distribution from @sec-structs into the book's running class, written as an S3 class and as a Rust type that implements a `Distribution` trait, and then adds a second distribution to show what a shared interface buys. The matching section of the Rust book is "Defining Shared Behavior with Traits" [@rustbook, sec. 10.2].
+
+## A normal distribution in S3
+
+An S3 object is an ordinary R object with a `class` attribute. A constructor function builds the list and attaches the class:
+
+```{r}
+#| label: r-normal-class
+normal <- function(mean = 0, sd = 1) {
+  structure(list(mean = mean, sd = sd), class = "normal")
+}
+
+dist <- normal(0, 2)
+class(dist)
+unclass(dist)
+```
+
+Calling `unclass()` shows that underneath, `dist` is the same list as in @sec-structs. The class is a label on top of it.
+
+In Rust, the struct from @sec-structs is already a type, so there's nothing to attach. The type `Normal` plays the role of the class.
+
+## Generics and methods
+
+In base R, `mean()` is already a generic, so supporting it takes one method, `mean.normal()`. A new generic, such as `variance()`, is a function that calls `UseMethod()`:
+
+```{r}
+#| label: r-generics
+mean.normal <- function(x, ...) x$mean
+
+variance <- function(x, ...) UseMethod("variance")
+variance.normal <- function(x, ...) x$sd^2
+
+mean(dist)
+variance(dist)
+```
+
+In Rust, the methods are declared together in a trait, and an `impl` block provides them for one type:
+
+```{rust}
+#| label: rust-trait
+trait Distribution {
+    fn mean(&self) -> f64;
+    fn variance(&self) -> f64;
+}
+
+struct Normal {
+    mean: f64,
+    sd: f64,
+}
+
+impl Distribution for Normal {
+    fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    fn variance(&self) -> f64 {
+        self.sd * self.sd
+    }
+}
+
+fn main() {
+    let dist = Normal { mean: 0.0, sd: 2.0 };
+    println!("{}", dist.mean());
+    println!("{}", dist.variance());
+}
+```
+
+The trait lists each method's signature and ends it with a semicolon instead of a body. The `impl Distribution for Normal` block then supplies the bodies, using the `&self` methods from @sec-structs. A struct can have a field and a method with the same name: `self.mean` is the field and `dist.mean()` is the method, much as `x$mean` and `mean(x)` are different things in R.
+
+The pieces line up like this:
+
+| S3 | Rust |
+|---------------------------|---------------------------|
+| A generic: `variance <- function(x, ...) UseMethod("variance")` | A method in a trait: `fn variance(&self) -> f64;` |
+| A method: `variance.normal <- function(x, ...) ...` | An implementation: `impl Distribution for Normal { ... }` |
+| A class: the string `"normal"` | A type: `Normal` |
+| R finds the method when the generic is called | The compiler finds the implementation from the type |
+
+A note on vocabulary: R calls `variance()` a generic, but in Rust "generic" means something else, a function or type with a type parameter (@sec-generics). This book uses "trait method" for the Rust side.
+
+One difference isn't visible in the table. S3 generics are independent of each other, so a class can have a `mean()` method and no `variance()` method. A trait groups its methods, and an implementation has to supply every method the trait leaves without a body. In this trait, that's all of them.
+
+## A second distribution
+
+Here's a uniform distribution in S3, with the `variance()` method forgotten:
+
+```{r}
+#| label: r-uniform-incomplete
+#| error: true
+uniform <- function(min = 0, max = 1) {
+  structure(list(min = min, max = max), class = "uniform")
+}
+mean.uniform <- function(x, ...) (x$min + x$max) / 2
+
+u <- uniform(0, 6)
+mean(u)
+variance(u)
+```
+
+R accepted the class and its one method, and the gap only showed up when `variance(u)` ran. The same omission in Rust is a compile error, even though the program never calls `variance()`:
+
+```{rust}
+#| label: rust-uniform-incomplete
+#| error: true
+trait Distribution {
+    fn mean(&self) -> f64;
+    fn variance(&self) -> f64;
+}
+
+struct Uniform {
+    min: f64,
+    max: f64,
+}
+
+impl Distribution for Uniform {
+    fn mean(&self) -> f64 {
+        (self.min + self.max) / 2.0
+    }
+}
+
+fn main() {
+    let dist = Uniform { min: 0.0, max: 6.0 };
+    println!("{}", dist.mean());
+}
+```
+
+Implementing a trait is a promise to provide its methods, and the compiler holds you to the whole promise at once.
+
+## Code that works with any distribution
+
+The payoff of a shared interface is code that works with any type that provides it. In R, any function that calls generics works this way, because S3 dispatch happens inside each call:
+
+```{r}
+#| label: r-describe
+variance.uniform <- function(x, ...) (x$max - x$min)^2 / 12
+
+describe <- function(x) {
+  cat("mean", mean(x), "variance", variance(x), "\n")
+}
+
+describe(normal(0, 2))
+describe(uniform(0, 6))
+```
+
+In Rust, a function says in its signature that it accepts any type implementing `Distribution`. The trait and `Normal` are the same as before, compiled but not shown:
+
+```{rust}
+#| label: rust-describe
+# trait Distribution {
+#     fn mean(&self) -> f64;
+#     fn variance(&self) -> f64;
+# }
+#
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+struct Uniform {
+    min: f64,
+    max: f64,
+}
+
+impl Distribution for Uniform {
+    fn mean(&self) -> f64 {
+        (self.min + self.max) / 2.0
+    }
+
+    fn variance(&self) -> f64 {
+        (self.max - self.min).powi(2) / 12.0
+    }
+}
+
+fn describe(dist: impl Distribution) {
+    println!("mean {}, variance {}", dist.mean(), dist.variance());
+}
+
+fn main() {
+    describe(Normal { mean: 0.0, sd: 2.0 });
+    describe(Uniform { min: 0.0, max: 6.0 });
+}
+```
+
+The `powi()` method raises a float to an integer power, so `powi(2)` is like `^2` in R. If you call `describe()` with a type that doesn't implement `Distribution`, the program doesn't compile, and the error lists the types that do.
+
+This version of `describe()` takes its argument by value. A `Normal` stored in a variable and passed to it is *moved* into the function, and the variable can't be used afterward. @sec-ownership explains moves, and @sec-borrowing shows how a function can borrow a value instead.
+
+::: {.callout-note title="Syntax ahead: impl Distribution"}
+As an argument type, `impl Distribution` means "a value of any type that implements `Distribution`". It's the shortest way to write a generic function. @sec-generics covers the longer forms and how the compiler turns one generic function into code for each type.
+:::
+
+## Default methods
+
+An S3 generic can have a `.default` method, which R uses when no method matches the class. Here it defines a standard deviation for anything that has a `variance()` method:
+
+```{r}
+#| label: r-default-method
+std_dev <- function(x, ...) UseMethod("std_dev")
+std_dev.default <- function(x, ...) sqrt(variance(x))
+
+std_dev(normal(0, 2))
+std_dev(uniform(0, 6))
+```
+
+A Rust trait can give a method a body, and every type that implements the trait gets that method without writing it:
+
+```{rust}
+#| label: rust-default-method
+trait Distribution {
+    fn mean(&self) -> f64;
+    fn variance(&self) -> f64;
+
+    fn std_dev(&self) -> f64 {
+        self.variance().sqrt()
+    }
+}
+
+# struct Normal {
+#     mean: f64,
+#     sd: f64,
+# }
+#
+# impl Distribution for Normal {
+#     fn mean(&self) -> f64 {
+#         self.mean
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         self.sd * self.sd
+#     }
+# }
+#
+# struct Uniform {
+#     min: f64,
+#     max: f64,
+# }
+#
+# impl Distribution for Uniform {
+#     fn mean(&self) -> f64 {
+#         (self.min + self.max) / 2.0
+#     }
+#
+#     fn variance(&self) -> f64 {
+#         (self.max - self.min).powi(2) / 12.0
+#     }
+# }
+#
+fn main() {
+    let normal = Normal { mean: 0.0, sd: 2.0 };
+    let uniform = Uniform { min: 0.0, max: 6.0 };
+    println!("{}", normal.std_dev());
+    println!("{}", uniform.std_dev());
+}
+```
+
+The implementations of `Normal` and `Uniform` haven't changed, and both now have `std_dev()`. A type can still write its own version to replace the default; `Normal` could return `self.sd` directly. The standard library documentation lists each trait's methods under two headings: "Required Methods", the ones an implementation has to write, and "Provided Methods", the ones with a default body [@rust-std].
+
+The uniform result also shows a difference in printing: R rounds to seven significant digits by default, while Rust prints every digit needed to identify the value (@sec-display).
+
+::: {.callout-warning title="Where the analogy breaks"}
+R's default method applies to any object at all, not only to distributions:
+
+```{r}
+#| label: r-default-anything
+#| error: true
+std_dev("hello")
+```
+
+The call reaches `std_dev.default()` and fails one step later, inside `variance()`. A Rust default method exists only on types that implement the trait, so `std_dev()` can't be called on a string in the first place.
+:::
+
+## An S3 class is only a label
+
+Because an S3 class is a string, you can attach it to anything:
+
+```{r}
+#| label: r-relabel
+#| error: true
+x <- "not a distribution"
+class(x) <- "normal"
+mean(x)
+```
+
+R dispatched to `mean.normal()`, which assumed a list and failed as soon as it used `x$mean`. Nothing in S3 connects the label to the data underneath. In Rust, a value's type is fixed when the value is created, so a string can't become a `Normal`.
+
+## No inheritance
+
+S3 classes can inherit. A class vector such as `c("normal", "distribution")` makes R look for a `normal` method first and a `distribution` method second, and `NextMethod()` passes a call along the chain. Rust has no inheritance between types. One struct can't extend another. Behavior that several types share goes in a trait, often as a default method like `std_dev()`, and data that several types share goes in a field that holds another struct. @sec-s4 returns to class hierarchies with S4's virtual classes.
+
+::: {.callout-note title="Package developer notes: method registration and the orphan rule" collapse="true"}
+A package registers its S3 methods with `S3method()` directives in its `NAMESPACE` file, and since R 3.6.0 it can register a method for a generic in another package, to take effect when that package is loaded [@r-exts, sec. 1.5.2]. In practice, any package can define a method for any generic and any class, including generics and classes it doesn't own.
+
+Rust forbids that with the *orphan rule*: a crate can implement a trait for a type only if the crate defines the trait or the type. Implementing the standard library's `Display` trait for the standard library's `Vec<f64>` is a compile error. A type the crate defines also counts when it's the trait's type parameter, as in `impl Mul<Normal> for f64` (@sec-operators), though generic implementations have extra restrictions. The rule guarantees that two crates can never supply conflicting implementations of the same trait for the same type [@rustbook, sec. 10.2]. @sec-crates covers crates.
+:::
+
+## Summary
+
+| R (S3) | Rust |
+|---------------------------|---------------------------|
+| `structure(list(...), class = "normal")` | A struct type, `Normal` |
+| A generic that calls `UseMethod()` | A method declared in a trait |
+| A method such as `variance.normal()` | `impl Distribution for Normal` |
+| A call with no applicable method fails at runtime | A missing required method fails to compile |
+| Any function can call any generic | `fn describe(dist: impl Distribution)` |
+| A `.default` method covers any class without its own method | A default method exists only for implementors |
+| `class(x) <-` relabels any object | A value's type can't change |
+| Class vectors and `NextMethod()` | No inheritance; traits and composition instead |
+| Any package can register any method | The orphan rule |

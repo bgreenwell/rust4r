@@ -1,0 +1,297 @@
+# Environments and Reference Classes {#sec-environments}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+Environments are the main kind of R object that copy-on-modify doesn't apply to. Two names can refer to the same environment, and a change made through one is visible through the other. Reference Classes build mutable objects on top of environments. Rust covers the same ground with three tools, from most to least common: a `&mut` reference for changing a value you don't own, a struct with `&mut self` methods for an object that changes over time, and `Rc<RefCell<T>>` for the rare value that several owners share and change. The matching sections of the Rust book are "`Rc<T>`, the Reference Counted Smart Pointer", "`RefCell<T>` and the Interior Mutability Pattern", and "Reference Cycles Can Leak Memory" [@rustbook, secs. 15.4, 15.5, 15.6].
+
+::: {.callout-note title="R refresher: environments" collapse="true"}
+An environment is a set of bindings from names to values, plus a parent environment where R looks up names it can't find. Every function call runs in a new environment of its own, which is where its arguments and local variables live. A call to `new.env()` creates an empty environment, and `$`, `assign()`, and `get()` read and write its bindings. Unlike vectors and lists, environments are never copied: `e2 <- e1` gives the same environment a second name.
+:::
+
+## Environments aren't copied
+
+Assigning an environment to a second name and changing it through that name changes it for both:
+
+```{r}
+#| label: r-env-shared
+e1 <- new.env()
+e1$count <- 0
+e2 <- e1
+e2$count <- 5
+e1$count
+```
+
+The same holds for function arguments. A function can change an environment it receives, and the caller sees the change:
+
+```{r}
+#| label: r-env-function
+increment <- function(counter) {
+  counter$count <- counter$count + 1
+}
+
+counter <- new.env()
+counter$count <- 0
+increment(counter)
+increment(counter)
+counter$count
+```
+
+A Rust function gets the same power from a mutable reference (@sec-borrowing):
+
+```{rust}
+#| label: rust-mut-struct
+struct Counter {
+    count: i32,
+}
+
+fn increment(counter: &mut Counter) {
+    counter.count = counter.count + 1;
+}
+
+fn main() {
+    let mut counter = Counter { count: 0 };
+    increment(&mut counter);
+    increment(&mut counter);
+    println!("{}", counter.count);
+}
+```
+
+Field access, `counter.count`, needs no `*`, because it goes through a reference on its own.
+
+::: {.callout-warning title="Where the analogy breaks"}
+In R, `increment(counter)` looks the same whether or not the function changes its argument. You find out by reading the function, or by knowing that `counter` is an environment. In Rust, the signature says `&mut Counter`, the call says `&mut counter`, and only one mutable reference can exist at a time. Unless its bindings are locked, any code that holds an R environment can change it at any moment. A plain Rust value, such as this `Counter`, can be changed only through its owner or through the single `&mut` it has lent out. Values inside a `RefCell`, later in this chapter, are the exception.
+:::
+
+## Reference Classes and `&mut self`
+
+A Reference Class is a class whose objects are environments, so its methods can change the object they're called on. The example here is an accumulator that keeps the mean and variance of the values it has seen, without storing the values. Welford's method updates both one value at a time, using the count, the running mean, and the running sum of squared deviations from the mean, `m2` [@welford1962]:
+
+```{r}
+#| label: r-refclass
+RunningStats <- setRefClass("RunningStats",
+  fields = list(n = "numeric", mean = "numeric", m2 = "numeric"),
+  methods = list(
+    add = function(x) {
+      n <<- n + 1
+      delta <- x - mean
+      mean <<- mean + delta / n
+      m2 <<- m2 + delta * (x - mean)
+    },
+    variance = function() if (n < 2) NA_real_ else m2 / (n - 1)
+  )
+)
+
+s <- RunningStats$new(n = 0, mean = 0, m2 = 0)
+for (x in c(2, 4, 4, 5)) s$add(x)
+s$mean
+s$variance()
+var(c(2, 4, 4, 5))
+```
+
+The methods change fields with `<<-`, and `var()` confirms the result. In Rust, the accumulator is a struct, and the method that changes it takes `&mut self`:
+
+```{rust}
+#| label: rust-running-stats
+struct RunningStats {
+    n: u32,
+    mean: f64,
+    m2: f64,
+}
+
+impl RunningStats {
+    fn new() -> RunningStats {
+        RunningStats { n: 0, mean: 0.0, m2: 0.0 }
+    }
+
+    fn add(&mut self, x: f64) {
+        self.n = self.n + 1;
+        let delta = x - self.mean;
+        self.mean = self.mean + delta / f64::from(self.n);
+        self.m2 = self.m2 + delta * (x - self.mean);
+    }
+
+    fn variance(&self) -> Option<f64> {
+        if self.n < 2 {
+            None
+        } else {
+            Some(self.m2 / f64::from(self.n - 1))
+        }
+    }
+}
+
+fn main() {
+    let data = vec![2.0, 4.0, 4.0, 5.0];
+    let mut s = RunningStats::new();
+    for i in 0..data.len() {
+        s.add(data[i]);
+    }
+    println!("{}", s.mean);
+    println!("{:?}", s.variance());
+}
+```
+
+The `add()` method takes `&mut self`, a mutable reference to the value it's called on, and changes its fields through `self`. The `variance()` method only reads them, so it takes `&self`. A method call borrows on its own: `s.add(data[i])` lends `s` to `add()` as `&mut`, with no `&mut` written at the call. The method's signature still says so, and `s` has to be declared `mut`, or the compiler rejects the call. A sample variance needs at least two values. With fewer, the R method returns `NA`, as `var()` does, and the Rust method returns `None` (@sec-missingness).
+
+::: {.callout-tip title="The same idea in R"}
+A Reference Class declares its fields and their classes, and assigning the wrong kind of value to a field is an error:
+
+```{r}
+#| label: r-refclass-type
+#| error: true
+s$n <- "four"
+```
+
+A Rust struct declares its fields and their types too, and checks every assignment when the program is compiled rather than when it runs.
+:::
+
+The two versions part ways when the object is assigned to a second name. In R, `t <- s` shares the object, as with any environment, and `$copy()` makes an independent one:
+
+```{r}
+#| label: r-refclass-copy
+t <- s
+t$add(10)
+s$n
+
+u <- s$copy()
+u$add(1)
+s$n
+u$n
+```
+
+In Rust, `let t = s;` moves the accumulator (@sec-ownership), and `s` can't be used afterward. Deriving `Clone` gives the struct a `.clone()` method, the counterpart of `$copy()`. Rust has no direct counterpart of `t <- s`, two names for one object that both can change. The closest is `Rc<RefCell<T>>`, which the rest of this chapter builds up in two steps.
+
+## Several owners with `Rc`
+
+The type `Rc<T>` lets one value have several owners. Calling `Rc::new()` puts the value behind a pointer that counts its owners, and `Rc::clone()` adds an owner without copying the value:
+
+```{rust}
+#| label: rust-rc
+use std::rc::Rc;
+
+fn main() {
+    let x = Rc::new(vec![1.0, 2.0, 3.0]);
+    let y = Rc::clone(&x);
+    println!("{:?} {:?}", x, y);
+    println!("{}", Rc::strong_count(&x));
+    {
+        let z = Rc::clone(&x);
+        println!("{}", Rc::strong_count(&x));
+    }
+    println!("{}", Rc::strong_count(&x));
+}
+```
+
+The three variables `x`, `y`, and later `z` all own the same vector. The function `Rc::strong_count()` reports the number of owners, which drops back to 2 when `z` goes out of scope at the end of its block. The vector is freed when the count reaches zero. The line `use std::rc::Rc;` brings `Rc` into scope, as `use std::fmt;` did in @sec-display. The owners of an `Rc` all have to be in one thread; @sec-concurrency covers `Arc`, its counterpart for sharing between threads.
+
+R keeps a similar count for every value. It uses the count to decide when to copy (@sec-ownership), and leaves freeing memory to the garbage collector. Rust's `Rc` uses its count to decide when to free.
+
+An `Rc` gives shared access, so the value behind it can't be changed: `y.push(4.0)` doesn't compile. Changing a value with several owners takes one more piece.
+
+## Changing a shared value with `RefCell`
+
+A `RefCell<T>` holds a value and lets it be borrowed mutably even through a shared reference. Its `borrow()` method returns a shared borrow of the value inside, and `borrow_mut()` a mutable one. Put a `RefCell` inside an `Rc`, and every owner can change the value. Here two names share one accumulator, first in R and then in Rust:
+
+```{r}
+#| label: r-shared-stats
+s <- RunningStats$new(n = 0, mean = 0, m2 = 0)
+t <- s
+s$add(2)
+t$add(4)
+s$n
+s$mean
+```
+
+```{rust}
+#| label: rust-rc-refcell
+use std::cell::RefCell;
+use std::rc::Rc;
+
+# struct RunningStats {
+#     n: u32,
+#     mean: f64,
+#     m2: f64,
+# }
+#
+# impl RunningStats {
+#     fn new() -> RunningStats {
+#         RunningStats { n: 0, mean: 0.0, m2: 0.0 }
+#     }
+#
+#     fn add(&mut self, x: f64) {
+#         self.n = self.n + 1;
+#         let delta = x - self.mean;
+#         self.mean = self.mean + delta / f64::from(self.n);
+#         self.m2 = self.m2 + delta * (x - self.mean);
+#     }
+# }
+#
+fn main() {
+    let s = Rc::new(RefCell::new(RunningStats::new()));
+    let t = Rc::clone(&s);
+
+    s.borrow_mut().add(2.0);
+    t.borrow_mut().add(4.0);
+
+    println!("{}", s.borrow().n);
+    println!("{}", s.borrow().mean);
+}
+```
+
+In Rust, `s` and `t` own one accumulator, and values added through either one reach it, just as they reach the single R object behind both names.
+
+A `RefCell` doesn't drop the borrowing rules from @sec-borrowing. It checks them when the program runs instead of when it compiles, and a violation panics:
+
+```{rust}
+#| label: rust-refcell-panic
+#| error: true
+use std::cell::RefCell;
+
+fn main() {
+    let x = RefCell::new(vec![1.0, 2.0]);
+    let reading = x.borrow();
+    x.borrow_mut().push(3.0);
+    println!("{:?}", reading);
+}
+```
+
+The shared borrow in `reading` is still active when `borrow_mut()` asks for a mutable one. With plain references, this program wouldn't compile. With `RefCell`, it compiles and stops at runtime. The Rust book calls this *interior mutability*: the value can change even though the code that changes it holds only a shared reference [@rustbook, sec. 15.5].
+
+A borrow from a `RefCell` also ends at a different point from a plain reference's. The value that `borrow()` returns holds the borrow until it's dropped, here at the end of `main()`, not until its last use as in @sec-borrowing. Moving the `println!` above the `borrow_mut()` call wouldn't help; putting `reading` in an inner block that closes before the call would. A borrow that isn't stored in a variable, as in `s.borrow_mut().add(2.0)`, ends with its statement, which is why the accumulator example never conflicts.
+
+::: {.callout-warning title="Where the analogy breaks"}
+Moving a check from compile time to runtime makes `RefCell` the most R-like part of Rust's borrowing rules. R itself has no such check, though. Any code holding an environment can change its unlocked bindings, even in the middle of a loop over its contents.
+:::
+
+::: {.callout-note title="An R habit to drop in Rust"}
+If you've used environments or Reference Classes to share one mutable object across an R program, the same design is available in Rust as `Rc<RefCell<T>>`, but it's the exception. Most Rust programs give each value one owner, lend it out with `&mut` when something else needs to change it, and move data between parts of the program instead of sharing it. If you find `Rc<RefCell<T>>` in every function signature, the design is probably fighting the borrowing rules instead of following them.
+:::
+
+Rust's `Rc` has one weakness that R's garbage collector doesn't. Two values that each hold an `Rc` pointing to the other keep each other's counts above zero, so neither is ever freed. R's garbage collector finds and frees such cycles. In Rust, they leak memory unless one of the links is a weak reference. A weak reference, made with `Rc::downgrade()`, points to the value without counting as an owner [@rustbook, sec. 15.6].
+
+::: {.callout-note title="Package developer notes: package state in an environment" collapse="true"}
+Packages keep mutable state, such as a cache or a setting chosen at load time, in an environment created in the package's namespace. A plain variable won't do, because the bindings in a namespace are locked once the package is loaded:
+
+```{r}
+#| label: r-namespace-locked
+bindingIsLocked("sd", asNamespace("stats"))
+```
+
+The binding to the environment is locked too, but the environment's contents can still change, because the environment isn't copied. Rust makes state shared across a whole program deliberately awkward. In safe Rust, a `static` value can be changed only through a type that makes the change safe when several threads run at once, such as a `Mutex` (@sec-concurrency).
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| An environment passed to a function can be changed by it | `&mut T`, marked at the call |
+| A Reference Class with `<<-` in its methods | A struct with `&mut self` methods |
+| Field classes checked on assignment | Field types checked at compile time |
+| `t <- s` shares the object | `let t = s;` moves it |
+| `$copy()` | `.clone()` |
+| Several names for one mutable object | `Rc<RefCell<T>>` |
+| No check on who changes an environment, or when | `RefCell` checks borrows at runtime and panics on a conflict |
+| The garbage collector frees cycles | `Rc` cycles leak; use a weak reference |

@@ -1,0 +1,308 @@
+# Getting set up {#sec-setup}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+R gives you a console: you type an expression and see its value. Rust doesn't come with one. You write a program in a file, compile it, and run what the compiler produces. This chapter installs the tools, builds a first program with Cargo, Rust's build tool, and then covers the syntax the next chapters rely on: variables, printing, functions, `if`, and `for` loops. The matching chapters in the Rust book are "Getting Started" and "Common Programming Concepts" [@rustbook, chaps. 1, 3].
+
+## Installing Rust
+
+Rust is installed and updated with `rustup` [@rustbook, sec. 1.1]. On macOS and Linux, run this in a terminal:
+
+```{.bash filename="Terminal"}
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+On Windows, download and run `rustup-init.exe` from <https://rustup.rs>.
+
+Rust also needs a *linker*, a program that joins compiled code into an executable [@rustbook, sec. 1.1]. On Windows, the installer may ask you to install the Visual Studio C++ build tools first; they provide one. On macOS, `xcode-select --install` installs one with Apple's command-line tools. On Linux, install your distribution's C compiler tools, such as Ubuntu's `build-essential`.
+
+You'll use three tools directly: `rustc`, the compiler; `cargo`, which builds projects and manages their dependencies; and `rustup`, which keeps the other two up to date (`rustup update`). Open a new terminal after installing, so that it finds the new commands, and check that they work:
+
+```{.bash filename="Terminal"}
+rustc --version
+cargo --version
+```
+
+The examples in this book use the 2024 edition of Rust, which needs Rust 1.85 or later [@rust185]. The preface lists the version used to build the book.
+
+You'll also want an editor that understands Rust. The standard tool is rust-analyzer, which shows types and errors as you type. In VS Code and Positron, install the rust-analyzer extension.
+
+## The Rust Playground
+
+The closest thing Rust has to R's console is the Rust Playground, <https://play.rust-lang.org>, which compiles and runs a program in the browser. It's convenient for trying out an example from this book. For anything longer, you'll work in a project.
+
+## A first project
+
+The `cargo new` command creates a project:
+
+```{.bash filename="Terminal"}
+cargo new hello
+cd hello
+```
+
+The project has two files that matter. Cargo also starts a Git repository and adds a `.gitignore`, unless the folder is already inside a repository:
+
+```{.text filename="Project layout"}
+hello/
+  .gitignore
+  Cargo.toml
+  src/
+    main.rs
+```
+
+The `Cargo.toml` file describes the project, much as `DESCRIPTION` describes an R package (@sec-crates covers it):
+
+```{.toml filename="Cargo.toml"}
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+```
+
+The file `src/main.rs` holds the program. Cargo starts you off with this one:
+
+```{rust}
+#| label: rust-hello
+#| filename: src/main.rs
+fn main() {
+    println!("Hello, world!");
+}
+```
+
+Every Rust program starts running at `fn main()`. Rust's `println!` prints a line; the `!` marks it as a macro rather than a function, a distinction @sec-macros explains. To compile and run the program, use `cargo run` from inside the project folder:
+
+```{.bash filename="Terminal"}
+cargo run
+```
+
+Cargo reports what it did, then the program's output appears:
+
+```{.text filename="Terminal"}
+   Compiling hello v0.1.0 (/path/to/hello)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running `target/debug/hello`
+Hello, world!
+```
+
+The compiled program is now in `target/debug/hello`, and you could run it directly. The `dev` profile is a debug build, which compiles quickly and checks for mistakes such as integer overflow (@sec-types). A few other commands come up often:
+
+| Command | What it does | Closest R equivalent |
+|-------------------|------------------------------|-------------------|
+| `cargo run` | Compile, then run | `Rscript script.R` |
+| `cargo check` | Report errors without building a program, which is faster | None; R reports errors as it runs |
+| `cargo build --release` | Build an optimized program in `target/release/` | None |
+| `cargo fmt` | Reformat the code | `styler::style_file()` |
+| `cargo clippy` | Flag common mistakes and unidiomatic code | `lintr::lint()` |
+
+Many examples in this book leave out `fn main()` to stay short. To run one yourself, paste it between the braces of `fn main() { }` in `src/main.rs`.
+
+## The syntax you need for now
+
+Most of Rust's basic syntax has a direct counterpart in R. This section covers the pieces @sec-vectors and @sec-types use, each next to its R counterpart.
+
+### Variables and printing
+
+R assigns with `<-` by convention. The `=` sign works too, except inside a function call, where it names an argument instead. Rust uses `let`, and each statement ends with a semicolon:
+
+```{r}
+#| label: r-variables
+x <- 5
+cat("x is", x, "\n")
+```
+
+```{rust}
+#| label: rust-variables
+let x = 5;
+println!("x is {x}");
+println!("x is {}", x);
+```
+
+In Rust, `println!` fills each pair of braces with a value. You can name a variable inside the braces, as in `{x}`, or leave the braces empty and pass the value after the string. @sec-vectors adds a third form, `{:?}`, for values such as vectors.
+
+The compiler works out that `x` is an integer. You can also state the type, as in `let x: i32 = 5;`, where `i32` is a 32-bit integer. @sec-types covers the number types.
+
+### Variables don't change unless you say so
+
+In R, any variable can be reassigned. In Rust, a variable can't be, unless you declare it with `mut`:
+
+```{rust}
+#| label: rust-immutable
+#| error: true
+let max_iter = 100;
+max_iter = 200;
+println!("{max_iter}");
+```
+
+The compiler points at both lines and suggests the fix:
+
+```{rust}
+#| label: rust-mutable
+let mut max_iter = 100;
+max_iter = 200;
+println!("{max_iter}");
+```
+
+::: {.callout-tip title="The same idea in R"}
+R can lock a variable too, but you have to ask. Here, `lockBinding()` locks the name `max_iter` in `environment()`, the environment the code runs in:
+
+```{r}
+#| label: r-lock-binding
+#| error: true
+max_iter <- 100
+lockBinding("max_iter", environment())
+max_iter <- 200
+```
+
+Rust reverses the default. Variables are locked unless you opt out with `mut`, so a `let` without `mut` tells the reader the value won't change.
+:::
+
+### Statements, expressions, and semicolons
+
+In R, a newline ends an expression once it's complete, and a semicolon is only needed to put two expressions on one line. In Rust, the semicolon isn't optional punctuation: whether a line ends with one changes what it means. Rust separates two kinds of code:
+
+- An *expression* produces a value: `5`, `x + 1`, or a function call.
+- A *statement* does something and produces no value. A `let` is a statement, and so is any expression followed by a semicolon: the semicolon runs the expression and discards its value. That's why every `println!` in this chapter ends with one.
+
+R has no statements at all. Even assignment is an expression, which is why `y <- (x <- 5)` works. A Rust `let` has no value, so it can't appear inside another expression.
+
+The difference matters most inside braces. A block, `{ ... }`, is an expression, and its value is its last expression, written without a semicolon. R's braces work the same way:
+
+```{r}
+#| label: r-block
+x <- 3
+y <- {
+  doubled <- x * 2
+  doubled + 1
+}
+y
+```
+
+```{rust}
+#| label: rust-block
+let x = 3;
+let y = {
+    let doubled = x * 2;
+    doubled + 1
+};
+println!("{y}");
+```
+
+Inside the braces, `let doubled = x * 2;` is a statement and `doubled + 1` is the block's value. The semicolon after the closing brace ends the outer `let`. In practice, three rules cover nearly every case:
+
+- End each `let`, and each line that only does something (such as a `println!`), with a semicolon.
+- Leave the semicolon off the last line of a block when that line is the value the block should produce. That's how a function returns a value and how an `if` produces one.
+- The closing brace of a function definition, a `for` loop, or an `if` that stands on its own needs no semicolon. A `let` whose value is a block or an `if` still ends with one, because the `let` is a statement.
+
+::: {.callout-warning title="Where the analogy breaks"}
+R's braces group code but don't limit where a name exists, so after the R block, `doubled` is still defined and holds 6. Rust's braces do limit it. The block hands its value to `y`, but `doubled` exists only inside it. Using `doubled` after the closing brace is a compile error: "cannot find value `doubled` in this scope". A `for` loop's variable is limited the same way: it doesn't exist after the loop.
+:::
+
+### Functions
+
+Here's the same function in R and in Rust. The Rust one lists the type of each argument and of the value it returns:
+
+```{r}
+#| label: r-function
+add <- function(x, y) {
+  x + y
+}
+add(2, 3)
+```
+
+```{rust}
+#| label: rust-function
+fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+fn main() {
+    println!("{}", add(2, 3));
+}
+```
+
+The `-> i32` after the arguments is the return type. Both languages return the value of the last expression in the body, so neither needs an explicit `return`. Functions usually go outside `main()`, so most examples that define one show `main()` as well.
+
+::: {.callout-warning title="Where the analogy breaks"}
+In R, `function(x, y) { x + y; }` still returns the sum. In Rust, a function body is a block, so the rule from the previous section applies: the last expression must not end with a semicolon. With one, it becomes a statement, the function returns nothing (written `()` in the error), and the compiler objects:
+
+```{rust}
+#| label: rust-semicolon
+#| error: true
+fn add(x: i32, y: i32) -> i32 {
+    x + y;
+}
+
+fn main() {
+    println!("{}", add(2, 3));
+}
+```
+:::
+
+### `if` and `else`
+
+In both languages `if` is an expression, so it can produce a value:
+
+```{r}
+#| label: r-if
+x <- -2
+sign <- if (x > 0) "positive" else "not positive"
+sign
+```
+
+```{rust}
+#| label: rust-if
+let x = -2;
+let sign = if x > 0 { "positive" } else { "not positive" };
+println!("{sign}");
+```
+
+Rust drops the parentheses around the condition and requires the braces. Each branch is a block whose value is its last expression, so `"positive"` and `"not positive"` have no semicolons; the `let` around the whole `if` does. The condition must be a `bool`: R accepts `if (1)`, but Rust rejects `if 1` because a number isn't a true or false value. The two branches must also produce the same type. Both produce text here, and replacing either string with `0` is a compile error, even for a branch that never runs. R lets each branch return whatever it likes. @sec-types has more on how strictly Rust keeps types apart.
+
+### `for` loops
+
+A loop over a range looks almost the same in both languages:
+
+```{r}
+#| label: r-for
+for (i in 1:3) {
+  cat("step", i, "\n")
+}
+```
+
+```{rust}
+#| label: rust-for
+for i in 1..=3 {
+    println!("step {i}");
+}
+```
+
+In Rust, `1..=3` runs from 1 to 3, like R's `1:3`. Without the `=`, a range stops before its end: `1..3` covers 1 and 2. @sec-vectors uses that second form to take part of a vector.
+
+::: {.callout-warning title="Where the analogy breaks"}
+R's `3:1` counts down. A Rust range only counts up, so `3..=1` is empty, and a loop over it runs zero times without any error. To count down, reverse the range with `(1..=3).rev()`; @sec-iterators covers methods like this one.
+:::
+
+### Comments
+
+R comments start with `#`; Rust comments start with `//`. Rust also has documentation comments that start with `///`, the counterpart of roxygen's `#'` (@sec-crates).
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| Type at the console | Write `src/main.rs`, then `cargo run` |
+| `x <- 5` | `let x = 5;` |
+| A newline ends a complete expression | A semicolon ends a statement |
+| `{ ... }` evaluates to its last expression | A block's value is its last expression, without a semicolon |
+| Any variable can be reassigned | `let mut x = 5;` to allow it |
+| `cat("x is", x, "\n")` | `println!("x is {x}");` |
+| `function(x, y) x + y` | `fn add(x: i32, y: i32) -> i32 { x + y }` |
+| `if (x > 0) a else b` | `if x > 0 { a } else { b }` |
+| `for (i in 1:3)` | `for i in 1..=3` |
+| `# comment` | `// comment` |

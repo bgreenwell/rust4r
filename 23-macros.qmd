@@ -1,0 +1,193 @@
+# NSE to macros {#sec-macros}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+An R function can work with the code of its arguments instead of their values. In R, `substitute()` captures an argument's expression, `quote()` captures code directly, and `eval()` runs captured code later, possibly against a data frame. This is non-standard evaluation (NSE), and it's behind `subset()`, `with()`, `stopifnot()`, and model formulas. Rust's closest tool is the *macro*: code that writes code. The macros in this chapter are called with a `!`, and the `#[derive(Debug)]` lines from @sec-structs are macros of another kind. You've been using macros since @sec-setup: `println!`, `vec!`, `format!`, and `write!`. This chapter explains why those are macros, introduces a few more that are useful for checking and debugging, and writes two small ones with `macro_rules!`. It stays light; writing complex macros is beyond this book. The matching section of the Rust book is "Macros" [@rustbook, sec. 20.5].
+
+## Capturing code
+
+Here's an R function that prints an expression alongside its value. In it, `substitute()` captures the code of the argument, and `deparse()` turns it into text:
+
+```{r}
+#| label: r-show
+show <- function(e) cat(deparse(substitute(e)), "=", e, "\n")
+x <- 4
+show(sqrt(x) + 1)
+```
+
+A Rust function only ever receives values, so it can't do this. A macro can:
+
+```{rust}
+#| label: rust-show
+macro_rules! show {
+    ($e:expr) => {
+        println!("{} = {:?}", stringify!($e), $e)
+    };
+}
+
+fn main() {
+    let x: f64 = 4.0;
+    show!(x.sqrt() + 1.0);
+}
+```
+
+In Rust, `macro_rules!` defines a macro by its rules. Each rule has a pattern on the left of `=>` and the code to produce on the right. The pattern `($e:expr)` matches any single expression and names it `$e`. On the right, `stringify!($e)` turns the expression into text, and `$e` puts the expression itself into the generated code. A call to `show!(x.sqrt() + 1.0)` is replaced, before compilation, by:
+
+```{.rust filename="Rust"}
+println!("{} = {:?}", "x.sqrt() + 1.0", x.sqrt() + 1.0)
+```
+
+The compiler then checks and compiles that code like any other. Unlike a function, a `macro_rules!` macro has to be defined above its first use, as `show!` is here.
+
+::: {.callout-warning title="Where the analogy breaks"}
+In R, captured code is a value the running program can inspect, change, and evaluate, in any environment it chooses:
+
+```{r}
+#| label: r-quote
+expr <- quote(sqrt(x) + 1)
+class(expr)
+eval(expr)
+eval(expr, list(x = 9))
+```
+
+A Rust macro does all its work at compile time, on the program's source. By the time the program runs, the macro's input is gone, and Rust has no `eval()` to run code built at runtime. Nothing in the language matches `eval(expr, list(x = 9))`, which evaluates the same code against different data.
+:::
+
+## Why `println!` is a macro
+
+@sec-setup promised an explanation of the `!` on `println!`. There are two reasons it's a macro rather than a function.
+
+First, it takes any number of arguments. A Rust function has a fixed list of arguments, with no counterpart of R's `...`, so anything that takes a variable number has to be a macro. Rust's `vec!` is a macro for the same reason; it plays the part of R's `c(...)`.
+
+Second, it checks its format string at compile time. In R, a mismatch between a format string and its arguments is found when the code runs:
+
+```{r}
+#| label: r-sprintf
+#| error: true
+sprintf("%d of %d", 1L)
+```
+
+In Rust, `println!` reads the string while the program is compiled:
+
+```{rust}
+#| label: rust-println-check
+#| error: true
+let x = 1;
+println!("{} of {}", x);
+```
+
+A function would receive the format string as a value, too late for the compiler to look inside it. The macro sees it as part of the source, which is also why the string has to be written out in the call: a variable holding it gives "format argument must be a string literal".
+
+## Macros for checking and debugging
+
+R's `stopifnot()` uses NSE to report which condition failed, by printing its code. Rust's `assert!` does the same with a macro:
+
+```{r}
+#| label: r-stopifnot
+#| error: true
+sd <- -1
+stopifnot(sd > 0)
+```
+
+```{rust}
+#| label: rust-assert
+#| error: true
+let sd = -1.0;
+assert!(sd > 0.0);
+```
+
+The `assert!` macro panics, with the condition's code in the message, when the condition is false. The related `assert_eq!(a, b)` checks that two values are equal and prints both when they aren't, which says more than `stopifnot(a == b)`.
+
+For debugging, `dbg!` prints an expression's code, its value, and the file and line it came from, then returns the value, so it can be wrapped around part of a larger expression:
+
+```{rust}
+#| label: rust-dbg
+let x = 4.0;
+let y = dbg!(x * 2.0) + 1.0;
+println!("{y}");
+```
+
+It's the macro version of putting `print(x * 2)` in R code while debugging, with the location and the expression added. The output goes to standard error, so it doesn't mix with a program's real output when the two are sent to different places. Unlike `print()`, though, `dbg!` takes ownership of its argument and hands it back, so `dbg!(v);` on its own line moves a vector `v` away. Writing `dbg!(&v)` lends it instead (@sec-borrowing).
+
+## A macro with repetition
+
+R's `stopifnot()` takes any number of conditions. This macro takes one or more, by repeating part of its pattern:
+
+```{rust}
+#| label: rust-check-all
+#| error: true
+macro_rules! check_all {
+    ($($cond:expr),+) => {
+        $(
+            assert!($cond, "{} is not true", stringify!($cond));
+        )+
+    };
+}
+
+fn main() {
+    let mean: f64 = 0.0;
+    let sd: f64 = -1.0;
+    check_all!(mean.is_finite(), sd > 0.0);
+}
+```
+
+The pattern `$( ... ),+` matches one or more expressions separated by commas, and `$( ... )+` in the output repeats its contents once for each of them. The call `check_all!(mean.is_finite(), sd > 0.0)` becomes two `assert!` calls, and the second one fails with a message in `stopifnot()`'s style. The second argument to `assert!` is a custom message, written like `println!`'s arguments.
+
+## Macro hygiene
+
+R's `subset()` evaluates its condition with the data frame's columns in front of the calling environment, a kind of NSE called *data masking*. A column can quietly take the place of a variable with the same name:
+
+```{r}
+#| label: r-data-masking
+df <- data.frame(x = 1:5, threshold = 10)
+threshold <- 3
+subset(df, x > threshold)
+```
+
+The intent was `x > 3`, but `threshold` found the column, whose value is 10, so no rows match. Rust's `macro_rules!` macros are *hygienic* for local variables: a variable a macro creates can't be confused with a variable at the call site, and the other way around:
+
+```{rust}
+#| label: rust-hygiene
+macro_rules! with_temp {
+    ($e:expr) => {{
+        let x = 100;
+        $e
+    }};
+}
+
+fn main() {
+    let x = 1;
+    println!("{}", with_temp!(x + 1));
+}
+```
+
+The macro defines its own `x`, but the `x` in `x + 1` was written at the call site, so it still means the caller's `x`, and the result is 2. The double braces make the macro's output a block, so its `let` stays inside. Other names aren't protected: a function that a macro defines, for instance, can be found by a name at the call site.
+
+::: {.callout-note title="Package developer notes: NSE and R CMD check" collapse="true"}
+The command `R CMD check` looks for names that a package's functions use but never define, and NSE code is full of them. Checking a function that uses a column name in `subset()` shows the note:
+
+```{r}
+#| label: r-check-usage
+f <- function(df) subset(df, score > 1)
+codetools::checkUsage(f, name = "f")
+```
+
+Packages silence the note by declaring such names with `utils::globalVariables()`. Rust has no such gap. Macros are expanded before the compiler checks the program, so every name in the generated code is checked like any other.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `substitute()`, `deparse()` | A macro with `stringify!` |
+| `quote()` and `eval()` at runtime | Code generated at compile time, then compiled |
+| `...` for any number of arguments | A macro, such as `vec!` or `println!` |
+| `sprintf()` checks its arguments when it runs | `println!` checks them when it compiles |
+| `stopifnot()` | `assert!`, `assert_eq!` |
+| `print()` while debugging | `dbg!` |
+| Data masking can capture a variable | Hygiene keeps a macro's local variables apart from the caller's |
+| `globalVariables()` to quiet `R CMD check` | Expanded code is checked like any other |

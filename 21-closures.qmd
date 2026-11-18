@@ -1,0 +1,338 @@
+# Closures and function factories {#sec-closures}
+
+```{r}
+#| label: setup
+#| include: false
+source("_common.R")
+```
+
+Every function you write in R is a closure: it remembers the environment it was created in, which is what makes function factories work. Rust closures, the `|x| x * 2` functions from @sec-iterators, also capture variables from where they're created. The difference is bookkeeping. The compiler records how a closure uses each variable it captures (reading it, changing it, or moving it out of the closure), and that decides where the closure can be passed and how often it can be called. This chapter covers capturing, function factories, functions that take functions, closures that change their state, and how R's lazy evaluation compares. The matching sections of the Rust book are "Closures" and "Advanced Functions and Closures" [@rustbook, secs. 13.1, 20.4].
+
+## Capturing variables
+
+In both R and Rust, a closure can use variables from the code around it:
+
+```{r}
+#| label: r-capture
+cutoff <- 1.96
+z <- c(0.5, -2.3, 1.0, 2.8)
+Filter(function(v) abs(v) > cutoff, z)
+```
+
+```{rust}
+#| label: rust-capture
+let cutoff = 1.96;
+let z: Vec<f64> = vec![0.5, -2.3, 1.0, 2.8];
+let extreme: Vec<f64> =
+    z.iter().copied().filter(|x| x.abs() > cutoff).collect();
+println!("{:?}", extreme);
+```
+
+The closure reads `cutoff` from `main()`. Its argument types are inferred, as they usually are for closures, though you can write them, as in `|x: &f64| x.abs() > cutoff`. The type is a reference because `filter()` lends each element to the closure (@sec-iterators). The call `x.abs()` needs no `*`, because method calls follow references on their own (@sec-borrowing).
+
+Reading `cutoff` means borrowing it, and the borrowing rules apply as usual: while the closure is still in use, `cutoff` can't be changed, even if it's declared with `mut`. An R closure looks the variable up each time it runs, so changing `cutoff` would change its answer.
+
+::: {.callout-warning title="Where the analogy breaks"}
+An R closure keeps its whole enclosing environment, including variables it never uses. Here the function needs only `small`, but it carries `big` along:
+
+```{r}
+#| label: r-closure-env
+make_f <- function() {
+  big <- rnorm(1e6)
+  small <- 1
+  function() small
+}
+f <- make_f()
+ls(environment(f))
+length(serialize(f, NULL))
+```
+
+Serializing `f`, as `saveRDS()` would, writes all million values of `big`. A Rust closure captures only the variables its body uses, so a closure like this one would hold a single number.
+:::
+
+## Function factories
+
+A function factory is a function that returns a function. In R, the returned function keeps the factory's arguments in its environment, and in Rust it takes ownership of them:
+
+```{r}
+#| label: r-factory
+power <- function(exp) {
+  force(exp)
+  function(x) x^exp
+}
+square <- power(2)
+cube <- power(3)
+square(4)
+cube(2)
+```
+
+```{rust}
+#| label: rust-factory
+fn power(exp: i32) -> impl Fn(f64) -> f64 {
+    move |x| x.powi(exp)
+}
+
+fn main() {
+    let square = power(2);
+    let cube = power(3);
+    println!("{}", square(4.0));
+    println!("{}", cube(2.0));
+}
+```
+
+Two pieces are new:
+
+- `impl Fn(f64) -> f64` is the return type: some type that can be called with an `f64` and returns an `f64`. Every closure has its own type, which has no name you can write, so the function promises a capability instead. It's the `impl Trait` from @sec-s3-traits, used for a return value.
+- `move` makes the closure take ownership of the variables it captures.
+
+Without `move`, the closure would borrow `exp`, which belongs to `power()` and is dropped when `power()` returns:
+
+```{rust}
+#| label: rust-factory-no-move
+#| error: true
+fn power(exp: i32) -> impl Fn(f64) -> f64 {
+    |x| x.powi(exp)
+}
+
+fn main() {}
+```
+
+The compiler suggests the fix. A borrowed `exp` would be a reference that outlives its value, the error that @sec-borrowing showed for references in general. Owning `exp` doesn't limit how often the closure can be called: `square` and `cube` can be called any number of times.
+
+The R version calls `force(exp)` because R evaluates arguments lazily, a difference the last section of this chapter returns to. Without `force()`, `exp` isn't evaluated until the returned function first uses it, so changing the variable passed as `exp` before then would change the exponent. Rust evaluates `exp` when `power()` is called, so its factory has no such gap.
+
+## Functions that take functions
+
+Factories are most useful when what they make is passed to another function. Maximum likelihood is the common case in statistics: a factory takes the data and returns the negative log-likelihood as a function of the parameter, and an optimizer finds its minimum. The data here are seven values, one far from the rest, and the model is a Cauchy distribution with location `m` and scale 1, whose heavy tails make the estimate resistant to the outlier:
+
+```{r}
+#| label: r-mle
+x <- c(-1.2, 0.3, 0.8, 1.1, 1.9, 2.4, 15)
+make_nll <- function(x) {
+  force(x)
+  function(m) -sum(dcauchy(x, location = m, log = TRUE))
+}
+nll <- make_nll(x)
+optimize(nll, c(-10, 20))
+c(mean(x), median(x))
+```
+
+The outlier pulls the mean to 2.9, while the maximum likelihood estimate, 1.05, stays near the median. In Rust, the factory owns the data, and the optimizer is a short golden-section search:
+
+```{rust}
+#| label: rust-mle
+fn make_nll(data: Vec<f64>) -> impl Fn(f64) -> f64 {
+    move |m| {
+        let mut total = 0.0;
+        for x in &data {
+            // -log of the Cauchy density, 1 / (pi * (1 + (x - m)^2))
+            total += (std::f64::consts::PI * (1.0 + (x - m).powi(2))).ln();
+        }
+        total
+    }
+}
+
+fn minimize(f: impl Fn(f64) -> f64, lower: f64, upper: f64) -> f64 {
+    // 0.618..., so each step keeps 61.8% of the interval
+    let ratio = (5.0_f64.sqrt() - 1.0) / 2.0;
+    let mut a = lower;
+    let mut b = upper;
+    for _ in 0..60 {
+        let c = b - ratio * (b - a);
+        let d = a + ratio * (b - a);
+        if f(c) < f(d) {
+            b = d;
+        } else {
+            a = c;
+        }
+    }
+    (a + b) / 2.0
+}
+
+fn main() {
+    let x = vec![-1.2, 0.3, 0.8, 1.1, 1.9, 2.4, 15.0];
+    let nll = make_nll(x);
+    let m = minimize(&nll, -10.0, 20.0);
+    println!("minimum {m:.4}, objective {:.4}", nll(m));
+    println!("{:.4}", minimize(|t| (t - 2.0).powi(2), 0.0, 5.0));
+}
+```
+
+In `power()`, `move` copied an `i32`. Here it moves the whole vector into the closure, which is how `nll` carries its data around, as the R closure does in its environment. After `make_nll(x)`, the vector belongs to the closure, so `main()` can't use `x` again (@sec-ownership); passing `x.clone()` would keep a copy. The loop adds up what `-dcauchy(x, m, log = TRUE)` gives in R, with the standard library's `std::f64::consts::PI` for $\pi$.
+
+The `minimize()` function takes `f: impl Fn(f64) -> f64`, so it accepts the closure from the factory and a closure written in place alike; the last line finds the minimum of $(t - 2)^2$. The call `minimize(&nll, ...)` passes a reference, which works because a reference to an `Fn` closure can be called too. Lending the closure leaves it in `main()`, which calls it again to print the objective. Passing `nll` itself would move it into `minimize()`, like any argument passed by value (@sec-ownership).
+
+Golden-section search is one of the two methods that R's `optimize()` combines. Each step compares `f` at two points inside the interval and drops the part beyond the larger value. Sixty steps shrink the interval from 30 to about `1e-11`, and the Rust estimate agrees with R's to four decimal places. Like `optimize()`, the search assumes one minimum in the interval. A Cauchy negative log-likelihood can have several, and this one has a second, shallow minimum near 14.4, so the interval matters.
+
+A named function can be passed the same way: `values.iter().copied().map(f64::sqrt)` passes the standard library's square root, as `sapply(x, sqrt)` passes R's.
+
+## Closures that change what they capture
+
+R's `<<-` assigns to a variable in an enclosing environment, which lets a closure keep state between calls. A Rust closure keeps its state in a variable it owns:
+
+```{r}
+#| label: r-counter
+make_counter <- function() {
+  count <- 0
+  function() {
+    count <<- count + 1
+    count
+  }
+}
+counter <- make_counter()
+counter()
+counter()
+```
+
+```{rust}
+#| label: rust-counter
+fn make_counter() -> impl FnMut() -> i32 {
+    let mut count = 0;
+    move || {
+        count = count + 1;
+        count
+    }
+}
+
+fn main() {
+    let mut counter = make_counter();
+    println!("{}", counter());
+    println!("{}", counter());
+}
+```
+
+The closure owns `count`, after `move`, and changes it on every call. A closure that assigns to a captured variable implements `FnMut` rather than `Fn`. Each call changes the closure, so `main()` declares `counter` with `mut` before calling it.
+
+Rust has three of these traits, and each closure implements the ones that its body allows:
+
+| Trait | What the closure does with captured variables | How often it can be called | In R |
+|--------------|--------------------------|--------------|--------------|
+| `Fn` | Only reads them | Any number of times | Most closures |
+| `FnMut` | Changes them | Any number of times, from a `mut` variable | A closure that uses `<<-` |
+| `FnOnce` | Moves them out, for example by returning one | Once | No equivalent |
+
+The traits nest. Every closure implements `FnOnce`, and one that implements `Fn` implements all three, so it can go wherever any of them is asked for. Implementing `Fn` doesn't mean a call has no effect, though: an `Fn` closure can print, or change a value inside a `RefCell` (@sec-environments). It can't change a captured variable directly.
+
+A closure that moves a captured value out implements only `FnOnce`, and calling it twice doesn't compile:
+
+```{rust}
+#| label: rust-fn-once
+#| error: true
+let text = String::from("hello");
+let take = move || text;
+println!("{}", take());
+println!("{}", take());
+```
+
+Returning `text` moves the string out of the closure, so after the first call there's nothing left to return.
+
+A function that accepts a closure states which kind it needs, and one that calls its argument only once can ask for `FnOnce` and accept any closure. Counting every call an optimizer makes to the objective needs a closure that changes a captured variable. In R, that's `<<-` again:
+
+```{r}
+#| label: r-count-calls
+calls <- 0
+counted <- function(m) {
+  calls <<- calls + 1
+  nll(m)
+}
+optimize(counted, c(-10, 20))$minimum
+calls
+```
+
+Because `minimize()` asks for `Fn`, it rejects the same closure written in Rust. The compiler "expected a closure that implements the `Fn` trait, but this closure only implements `FnMut`", and it points at the line that changes `calls`. Asking for `FnMut` instead lets `minimize()` take both kinds, since every `Fn` closure is also an `FnMut`. The argument needs `mut`, because calling an `FnMut` closure changes it. The factory and the body of `minimize()` are the same as before, compiled but not shown:
+
+```{rust}
+#| label: rust-count-calls
+# fn make_nll(data: Vec<f64>) -> impl Fn(f64) -> f64 {
+#     move |m| {
+#         let mut total = 0.0;
+#         for x in &data {
+#             total += (std::f64::consts::PI * (1.0 + (x - m).powi(2))).ln();
+#         }
+#         total
+#     }
+# }
+#
+fn minimize(mut f: impl FnMut(f64) -> f64, lower: f64, upper: f64) -> f64 {
+    // The same golden-section steps as before
+#     let ratio = (5.0_f64.sqrt() - 1.0) / 2.0;
+#     let mut a = lower;
+#     let mut b = upper;
+#     for _ in 0..60 {
+#         let c = b - ratio * (b - a);
+#         let d = a + ratio * (b - a);
+#         if f(c) < f(d) {
+#             b = d;
+#         } else {
+#             a = c;
+#         }
+#     }
+#     (a + b) / 2.0
+}
+
+fn main() {
+#     let nll = make_nll(vec![-1.2, 0.3, 0.8, 1.1, 1.9, 2.4, 15.0]);
+    let mut calls = 0;
+    let counted = |m| {
+        calls += 1;
+        nll(m)
+    };
+    let m = minimize(counted, -10.0, 20.0);
+    println!("{m:.4} after {calls} calls");
+}
+```
+
+The closure borrows `calls` with `&mut`, so it updates the counter in `main()`. With `move`, it would get its own copy of the `i32`, and the program would report 0 calls. The borrow lasts until `minimize()` is done with `counted`, so `println!` can read `calls` afterward. No `mut` is needed on `counted`, because `main()` never calls it; `minimize()` does, through its `mut f`.
+
+The estimates agree, but the counts don't: 120 calls here, against 12 for R, which adds parabolic interpolation to its golden-section steps and stops at a tolerance of about `1e-4`. The loop in `minimize()` always takes 60 steps of two calls each. A careful golden-section search reuses one of the two values at every step, which is what the golden ratio makes possible; I left that out to keep the code short.
+
+::: {.callout-tip title="The same idea in R"}
+R's `<<-` in a closure is `FnMut` without the paperwork. The R closure changes a variable in an enclosing environment. The Rust closure changes one it owns, as in `make_counter()`, or one it borrows with `&mut`, as in `counted`. What Rust adds is that the type says so, and code that receives the closure has to allow for it.
+:::
+
+## Lazy evaluation
+
+R doesn't evaluate a function's arguments until the function uses them. An argument that's never used is never evaluated:
+
+```{r}
+#| label: r-lazy
+ignore_it <- function(x) 10
+ignore_it(stop("never evaluated"))
+```
+
+Rust evaluates every argument before the call, so an expensive or failing argument is evaluated even if the function doesn't need it. The way to delay work is to pass a closure, which runs only if it's called. `unwrap_or()` from @sec-missingness takes a value, and `unwrap_or_else()` takes a closure:
+
+```{rust}
+#| label: rust-unwrap-or-else
+fn fallback() -> f64 {
+    println!("computing the fallback");
+    0.0
+}
+
+fn main() {
+    let x: Option<f64> = Some(2.5);
+    let a = x.unwrap_or(fallback());
+    let b = x.unwrap_or_else(|| fallback());
+    println!("{a} {b}");
+}
+```
+
+Since `x` holds a value, neither fallback is needed. Writing `unwrap_or(fallback())` calls `fallback()` anyway, before `unwrap_or()` even starts, while `unwrap_or_else()` never calls its closure. The empty bars, `||`, make a closure with no arguments. Many standard library methods come in these two forms, a plain one that takes a value and an `_else` one that takes a closure. For a value that should be computed on first use and then kept, the standard library has `LazyCell`.
+
+::: {.callout-note title="An R habit to drop in Rust"}
+R's lazy arguments make some idioms work that Rust doesn't support, such as a default value that refers to a variable the function creates later, or `missing()` to check whether an argument was supplied. In Rust, every argument has a value by the time the function starts. An argument that may be left out becomes an `Option`, and the caller still passes it, as `None` (@sec-missingness). A delayed one becomes a closure.
+:::
+
+## Summary
+
+| R | Rust |
+|---------------------------|---------------------------|
+| `function(x) x^2`, `\(x) x^2` | `|x: f64| x.powi(2)` |
+| A closure keeps its whole environment | A closure captures only the variables it uses |
+| A function factory returns a function | `fn f(...) -> impl Fn(f64) -> f64`, with `move` |
+| Pass a function as an argument | `f: impl Fn(f64) -> f64` |
+| `sapply(x, sqrt)` | `.map(f64::sqrt)` |
+| `<<-` keeps state between calls | An `FnMut` closure |
+| A closure can be called any number of times | An `FnOnce` closure can be called only once |
+| Arguments are evaluated when first used; `force()` evaluates them now | Arguments are evaluated before the call; closures delay work |
+| `missing()`, defaults computed from other arguments | `Option` arguments, passed as `None` when absent |
